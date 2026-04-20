@@ -7,6 +7,8 @@ import time
 import asyncio
 import logging
 import threading
+import urllib.request
+import urllib.parse
 from datetime import datetime
 from typing import Optional, Dict, List
 
@@ -278,11 +280,20 @@ class GrabberEngine:
         ]
         max_retries = self.cfg.get('max_click_retries', 100)
         delay = self.cfg.get('click_delay', 0.05)
+        lock_delay_ms = self.cfg.get('lock_delay', 0)
+
         for attempt in range(max_retries):
             if self.won:
                 return False
             if self._click(page, booking_sels, timeout=300):
                 self.log('info', f'✅ 预约按钮已点击 (第{attempt + 1}次)')
+
+                # 锁定延迟：点击预约后等待指定毫秒数
+                if lock_delay_ms > 0:
+                    lock_delay_sec = lock_delay_ms / 1000.0
+                    self.log('info', f'⏳ 锁定延迟 {lock_delay_ms}ms...')
+                    time.sleep(lock_delay_sec)
+
                 time.sleep(2)
                 return True
             time.sleep(delay)
@@ -375,7 +386,9 @@ class GrabberEngine:
         for sel in sels:
             if page.query_selector(sel):
                 self._shot(page, 'captcha')
-                self.log('warning', '🔐 需要验证码，已截图')
+                self.log('warning', '🔐 检测到验证码')
+                # 尝试自动识别
+                self.solve_captcha(page)
                 return True
         return True
 
@@ -413,7 +426,20 @@ class GrabberEngine:
         try:
             if self.won:
                 return 'other_won'
+
+            # 关键词搜索
+            self.search_by_keyword(page)
+
+            # 定位区块（GetBlock）
+            self.navigate_to_block(page)
+
             self.pick_schedule(page, self.cfg.get('schedule_index', 0))
+
+            # 次日票务开关
+            if self.cfg.get('day2', False):
+                self.log('info', '📅 次日票务模式，尝试选择第2场')
+                self.pick_schedule(page, max(self.cfg.get('schedule_index', 0), 1))
+
             if not self.click_booking(page):
                 return 'booking_fail'
             if self.won:
@@ -421,18 +447,50 @@ class GrabberEngine:
             self.handle_popup(page)
             pages = self.context.pages
             work_page = pages[-1] if len(pages) > 1 else page
+
             if not self.pick_grade(work_page, self.cfg.get('seat_prefs', [0, 1, 2, 3, 4])):
+                # 自动取消
+                self.do_cancel_if_failed(work_page)
                 return 'grade_fail'
+
             self.pick_seat(work_page)
+
+            # 锁票
+            self.lock_ticket(work_page)
+
+            # 验证码处理（含自动识别）
             self.handle_captcha(work_page)
+
+            # 选择支付渠道
+            self.select_payment_method(work_page)
+
             self.do_submit(work_page)
             result = self.check_result(work_page)
+
             if result not in ('sold_out', 'unknown', 'other_won'):
                 self._mark_win(tab_id, result)
+                # 抢票成功后的操作
+                self.send_dingtalk(f'🎉 抢票成功！订单号: {result}')
+
+                # 自动过户
+                if self.cfg.get('auto_guohu', False):
+                    self.do_transfer(work_page)
+
                 return 'success'
+
+            # 失败处理
+            if result == 'sold_out':
+                self.send_dingtalk('😢 已售罄')
+            self.do_cancel_if_failed(work_page)
+
             return result
         except Exception as e:
             self.log('error', f'[Tab {tab_id}] 异常: {e}')
+            # 异常时自动取消
+            try:
+                self.do_cancel_if_failed(page)
+            except Exception:
+                pass
             return 'error'
 
     def run(self, target_time: Optional[datetime] = None) -> Dict:
@@ -441,18 +499,58 @@ class GrabberEngine:
         self.log('info', '=' * 50)
         self.log('info', '🎫 Weverse Con 2026 抢票引擎启动')
         self.log('info', f'📄 {self.cfg.get("perf_url", "N/A")}')
+
+        # 记录配置
         if target_time:
             kind = "会员预售" if self.cfg.get('presale_time') else "一般开售"
             self.log('info', f'⏰ {kind}: {target_time}')
+        if self.cfg.get('lock_delay', 0) > 0:
+            self.log('info', f'⏳ 锁定延迟: {self.cfg["lock_delay"]}ms')
+        if self.cfg.get('delay_start', 0) > 0:
+            self.log('info', f'⏳ 启动延迟: {self.cfg["delay_start"]}ms')
+        if self.cfg.get('kr_ticket_mode'):
+            self.log('info', f'🏷️ 票务模式: {self.cfg["kr_ticket_mode"]}')
+        if self.cfg.get('keyword'):
+            self.log('info', f'🔍 关键词: {self.cfg["keyword"]}')
+        if self.cfg.get('auto_guohu'):
+            self.log('info', '🔄 自动过户已开启')
+        if self.cfg.get('yes_captcha_key'):
+            self.log('info', '🔐 验证码自动识别已开启')
+        if self.cfg.get('ding_webhook'):
+            self.log('info', '🔔 钉钉通知已开启')
+        if self.cfg.get('proxy_api'):
+            self.log('info', '🔄 代理轮换已开启')
+
         self.log('info', '=' * 50)
+
+        # 启动通知
+        self.send_dingtalk('🚀 抢票引擎已启动，准备抢票...')
+
         result = {'status': 'pending', 'order_id': self.order_id}
         try:
+            # 代理轮换
+            if self.cfg.get('proxy_api'):
+                new_proxy = self.rotate_proxy()
+                if new_proxy:
+                    self.cfg['proxy'] = new_proxy
+
+            # 启动延迟
+            delay_start_ms = self.cfg.get('delay_start', 0)
+            if delay_start_ms > 0 and not target_time:
+                delay_sec = delay_start_ms / 1000.0
+                self.log('info', f'⏳ 等待启动延迟 {delay_start_ms}ms...')
+                time.sleep(delay_sec)
+
             self.start_browser()
             if not self.login():
                 result['status'] = 'login_failed'
                 self._update_order(status='failed', result_detail='登录失败')
+                self.send_dingtalk('❌ 登录失败，请检查账号密码')
                 return result
-            tabs = self.cfg.get('tab_count', 4)
+
+            # 获取线程数（优先使用 thread_count，其次 tab_count）
+            tabs = self.cfg.get('thread_count', self.cfg.get('tab_count', 4))
+
             if tabs == 1:
                 page = self.new_page()
                 self.goto_perf(page)
@@ -471,9 +569,17 @@ class GrabberEngine:
                     except Exception:
                         pass
                     self.log('info', f'[Tab {i + 1}] 预加载完成')
-                    time.sleep(0.15)
+
+                    # 标签页间间隔
+                    delay_between = self.cfg.get('delay_start', 150) / 1000.0
+                    time.sleep(delay_between)
+
                 if target_time:
                     Timer.wait(target_time, self.cfg.get('pre_open_sec', 3), self.log)
+
+                # 更新实时统计
+                self._update_order(total_tasks=tabs, threads_running=tabs)
+
                 with ThreadPoolExecutor(max_workers=tabs) as pool:
                     futures = {}
                     for i in range(tabs):
@@ -485,17 +591,27 @@ class GrabberEngine:
                             status = f.result()
                             self.log('info', f'[Tab {tab_id}] 结果: {status}')
                             if status == 'success':
+                                self._update_order(success_tasks=1, threads_running=0)
                                 break
                         except Exception as e:
                             self.log('error', f'[Tab {tab_id}] 异常: {e}')
+
                 result['status'] = 'success' if self._won else 'failed'
+
+            # 最终通知
+            if result['status'] == 'success':
+                self.send_dingtalk(f'🎉 抢票成功！')
+            else:
+                self.send_dingtalk(f'❌ 抢票失败: {result["status"]}')
+
             if result['status'] != 'success':
-                self._update_order(status=result['status'], result_detail=json.dumps(self._logs[-5:]))
+                self._update_order(status=result['status'], result_detail=json.dumps(self._logs[-5:]), threads_running=0)
             return result
         except Exception as e:
             self.log('error', f'引擎异常: {e}')
             result['status'] = 'error'
-            self._update_order(status='error', result_detail=str(e))
+            self._update_order(status='error', result_detail=str(e), threads_running=0)
+            self.send_dingtalk(f'⚠️ 引擎异常: {str(e)[:100]}')
             return result
         finally:
             self.save_state()
@@ -503,6 +619,279 @@ class GrabberEngine:
 
     def get_logs(self) -> list:
         return list(self._logs)
+
+    # ============================================================
+    #  实际功能方法
+    # ============================================================
+
+    def send_dingtalk(self, message: str):
+        """发送钉钉通知"""
+        webhook = self.cfg.get('ding_webhook', '')
+        if not webhook:
+            return
+        try:
+            data = json.dumps({
+                'msgtype': 'text',
+                'text': {'content': f'🎫 [订单#{self.order_id}] {message}'}
+            }).encode('utf-8')
+            req = urllib.request.Request(webhook, data=data, headers={'Content-Type': 'application/json'})
+            resp = urllib.request.urlopen(req, timeout=5)
+            self.log('info', f'🔔 钉钉通知已发送: {message[:50]}')
+        except Exception as e:
+            self.log('warning', f'钉钉通知发送失败: {e}')
+
+    def rotate_proxy(self) -> str:
+        """通过代理轮换 API 获取新代理"""
+        proxy_api = self.cfg.get('proxy_api', '')
+        if not proxy_api:
+            return ''
+        try:
+            resp = urllib.request.urlopen(proxy_api, timeout=10)
+            new_proxy = resp.read().decode('utf-8').strip()
+            if new_proxy:
+                self.log('info', f'🔄 代理已轮换: {new_proxy[:30]}...')
+                return new_proxy
+        except Exception as e:
+            self.log('warning', f'代理轮换失败: {e}')
+        return ''
+
+    def solve_captcha(self, page) -> bool:
+        """使用 YesCaptcha 自动识别验证码"""
+        api_key = self.cfg.get('yes_captcha_key', '')
+        if not api_key:
+            return True  # 没有 key 则跳过，等待手动
+
+        # 检测验证码图片
+        captcha_selectors = ['#captcha', '#Captcha', '.captcha_area', 'img[src*="captcha"]', '#captchaImage']
+        captcha_img = None
+        for sel in captcha_selectors:
+            el = page.query_selector(sel)
+            if el:
+                captcha_img = el
+                break
+
+        if not captcha_img:
+            return True  # 没有验证码
+
+        self.log('info', '🔐 检测到验证码，尝试自动识别...')
+
+        # 截图验证码
+        captcha_path = f"screenshots/order{self.order_id}_captcha_{datetime.now():%H%M%S}.png"
+        try:
+            captcha_img.screenshot(path=captcha_path)
+        except Exception:
+            self._shot(page, 'captcha')
+            self.log('warning', '验证码截图失败，已保存全页截图')
+            return True
+
+        # 调用 YesCaptcha API
+        try:
+            # 1. 上传图片创建任务
+            import base64
+            with open(captcha_path, 'rb') as f:
+                img_b64 = base64.b64encode(f.read()).decode()
+
+            create_data = json.dumps({
+                'clientKey': api_key,
+                'task': {
+                    'type': 'ImageToTextTask',
+                    'body': img_b64,
+                }
+            }).encode()
+            req = urllib.request.Request(
+                'https://api.yescaptcha.com/createTask',
+                data=create_data,
+                headers={'Content-Type': 'application/json'}
+            )
+            resp = urllib.request.urlopen(req, timeout=30)
+            result = json.loads(resp.read())
+
+            if result.get('errorId') == 0 and result.get('solution', {}).get('text'):
+                captcha_text = result['solution']['text']
+                self.log('info', f'✅ 验证码识别结果: {captcha_text}')
+
+                # 2. 填入验证码
+                input_selectors = ['#captchaInput', '#captchaCode', 'input[name="captcha"]', 'input[placeholder*="captcha"]', 'input[placeholder*="인증"]']
+                for sel in input_selectors:
+                    try:
+                        page.fill(sel, captcha_text, timeout=2000)
+                        self.log('info', '✅ 验证码已填入')
+                        return True
+                    except Exception:
+                        continue
+
+                # 兜底：尝试找附近的输入框
+                self.log('warning', '找不到验证码输入框，已识别但未填入')
+                return True
+            else:
+                self.log('warning', f'验证码识别失败: {result.get("errorDescription", "未知错误")}')
+        except Exception as e:
+            self.log('warning', f'验证码识别异常: {e}')
+
+        self._shot(page, 'captcha_failed')
+        return True
+
+    def navigate_to_block(self, page) -> bool:
+        """跳转到指定区块（GetBlock）"""
+        block_no = self.cfg.get('block_no', '')
+        goods_code = self.cfg.get('goods_code', '')
+        if not block_no:
+            return True  # 没有指定区块，跳过
+
+        self.log('info', f'🎯 定位区块: {block_no}')
+
+        # 尝试在页面中查找区块列表并点击对应区块
+        block_selectors = [
+            f'[data-block-no="{block_no}"]',
+            f'[data-block="{block_no}"]',
+            f'.block_item[data-id="{block_no}"]',
+            f'tr[data-block="{block_no}"]',
+        ]
+        for sel in block_selectors:
+            try:
+                el = page.query_selector(sel)
+                if el:
+                    el.click()
+                    self.log('info', f'✅ 已选择区块 {block_no}')
+                    time.sleep(0.5)
+                    return True
+            except Exception:
+                continue
+
+        # 尝试通过下拉选择
+        for sel in ['#blockNo', 'select[name="blockNo"]', '#blockList']:
+            try:
+                opts = page.query_selector_all(f'{sel} option')
+                for opt in opts:
+                    if block_no in (opt.get_attribute('value') or '') or block_no in (opt.inner_text() or ''):
+                        page.select_option(sel, opt.get_attribute('value'))
+                        self.log('info', f'✅ 下拉选择区块 {block_no}')
+                        return True
+            except Exception:
+                continue
+
+        self.log('info', f'区块 {block_no} 未找到，使用默认选择')
+        return True
+
+    def search_by_keyword(self, page) -> bool:
+        """按关键词搜索并定位票务"""
+        keyword = self.cfg.get('keyword', '')
+        if not keyword:
+            return True
+
+        self.log('info', f'🔍 搜索关键词: {keyword}')
+
+        # 尝试在搜索框中输入
+        search_selectors = ['#keyword', 'input[name="keyword"]', 'input[placeholder*="검색"]', 'input[placeholder*="搜索"]', '.search_input']
+        for sel in search_selectors:
+            try:
+                page.fill(sel, keyword, timeout=2000)
+                self.log('info', f'✅ 关键词已输入: {keyword}')
+                # 尝试点击搜索按钮
+                for btn_sel in ['#btnSearch', 'button:has-text("검색")', '.btn_search', 'button[type="submit"]']:
+                    try:
+                        page.click(btn_sel, timeout=1000)
+                        break
+                    except Exception:
+                        continue
+                time.sleep(1)
+                return True
+            except Exception:
+                continue
+
+        self.log('info', '未找到搜索框，跳过关键词搜索')
+        return True
+
+    def lock_ticket(self, page) -> bool:
+        """锁票操作（SuoTou）"""
+        if not self.cfg.get('suo_tou', False):
+            return True
+
+        self.log('info', '🔒 执行锁票...')
+        lock_selectors = ['#btnLock', '.btn_lock', 'button:has-text("锁定")', 'button:has-text("잠금")']
+        for sel in lock_selectors:
+            try:
+                page.click(sel, timeout=2000)
+                self.log('info', '✅ 锁票成功')
+                return True
+            except Exception:
+                continue
+
+        self.log('info', '未找到锁票按钮，跳过')
+        return True
+
+    def do_transfer(self, page) -> bool:
+        """自动过户操作（AutoGuoHu）"""
+        if not self.cfg.get('auto_guohu', False):
+            return True
+
+        self.log('info', '🔄 执行自动过户...')
+        transfer_selectors = ['#btnTransfer', '.btn_transfer', 'button:has-text("양도")', 'button:has-text("过户")', 'a:has-text("양도")']
+        for sel in transfer_selectors:
+            try:
+                page.click(sel, timeout=3000)
+                self.log('info', '✅ 过户按钮已点击')
+                time.sleep(2)
+
+                # 确认过户
+                confirm_selectors = ['#btnConfirm', 'button:has-text("확인")', 'button:has-text("确认")']
+                for csel in confirm_selectors:
+                    try:
+                        page.click(csel, timeout=2000)
+                        self.log('info', '✅ 过户确认完成')
+                        return True
+                    except Exception:
+                        continue
+                return True
+            except Exception:
+                continue
+
+        self.log('info', '未找到过户按钮')
+        return True
+
+    def do_cancel_if_failed(self, page) -> bool:
+        """异常时自动取消（AutoCancel）"""
+        if not self.cfg.get('auto_cancel', False):
+            return True
+
+        self.log('info', '❌ 执行自动取消...')
+        cancel_selectors = ['#btnCancel', '.btn_cancel', 'button:has-text("취소")', 'button:has-text("取消")']
+        for sel in cancel_selectors:
+            try:
+                page.click(sel, timeout=2000)
+                self.log('info', '✅ 订单已取消')
+                return True
+            except Exception:
+                continue
+
+        self.log('info', '未找到取消按钮')
+        return True
+
+    def select_payment_method(self, page) -> bool:
+        """选择韩国支付渠道（ko_pay）"""
+        ko_pay = self.cfg.get('ko_pay', '')
+        if not ko_pay:
+            return True
+
+        self.log('info', f'💳 选择支付渠道: {ko_pay}')
+
+        # 尝试下拉选择支付方式
+        pay_selects = ['#payMethod', 'select[name="payMethod"]', '#paymentType', 'select[name="payment"]']
+        for sel in pay_selects:
+            try:
+                opts = page.query_selector_all(f'{sel} option')
+                for opt in opts:
+                    text = opt.inner_text() or ''
+                    value = opt.get_attribute('value') or ''
+                    if ko_pay.lower() in text.lower() or ko_pay.lower() in value.lower():
+                        page.select_option(sel, value)
+                        self.log('info', f'✅ 支付渠道已选择: {text}')
+                        return True
+            except Exception:
+                continue
+
+        self.log('info', '未找到支付渠道选择器')
+        return True
 
 
 # ============================================================

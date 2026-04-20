@@ -208,6 +208,26 @@ def start_grabber(order_id):
         'interpark_pw': user.interpark_pw_encrypted if user else '',
         'presale_time': order.presale_time,
         'ticket_classes': tc_map,
+        # 新增配置
+        'goods_code': order.goods_code,
+        'place_code': order.place_code,
+        'seat_mode': order.seat_mode,
+        'block_no': order.block_no,
+        'lock_delay': order.lock_delay,
+        'delay_start': order.delay_start,
+        'kr_ticket_mode': order.kr_ticket_mode,
+        'auto_guohu': order.auto_guohu,
+        'auto_cancel': order.auto_cancel,
+        'guohu_pay': order.guohu_pay,
+        'yes_captcha_key': order.yes_captcha_key,
+        'proxy_api': order.proxy_api,
+        'ding_webhook': order.ding_webhook,
+        'thread_count': order.thread_count,
+        'keyword': order.keyword,
+        'suo_tou': order.suo_tou,
+        'day2': order.day2,
+        'pre_yn': order.pre_yn,
+        'ko_pay': order.ko_pay,
     }
 
     target_time = None
