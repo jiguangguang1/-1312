@@ -3,6 +3,7 @@
 from functools import wraps
 from flask import jsonify
 from flask_jwt_extended import get_jwt_identity, verify_jwt_in_request
+from jwt import ExpiredSignatureError, InvalidTokenError
 from models import User, db
 
 
@@ -11,6 +12,10 @@ def login_required(f):
     def decorated(*args, **kwargs):
         try:
             verify_jwt_in_request()
+        except ExpiredSignatureError:
+            return jsonify({'error': '登录已过期，请重新登录'}), 401
+        except InvalidTokenError:
+            return jsonify({'error': '无效的登录凭证'}), 401
         except Exception:
             return jsonify({'error': '请先登录'}), 401
         return f(*args, **kwargs)
@@ -26,6 +31,10 @@ def admin_required(f):
             user = db.session.get(User, user_id)
             if not user or not user.is_admin:
                 return jsonify({'error': '需要管理员权限'}), 403
+        except ExpiredSignatureError:
+            return jsonify({'error': '登录已过期，请重新登录'}), 401
+        except InvalidTokenError:
+            return jsonify({'error': '无效的登录凭证'}), 401
         except Exception:
             return jsonify({'error': '请先登录'}), 401
         return f(*args, **kwargs)

@@ -3,6 +3,7 @@
 import os
 import sys
 import json
+import hashlib
 
 # 确保能导入同目录模块
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -17,6 +18,7 @@ from auth import login_required, admin_required
 from routes.orders import orders_bp
 from routes.admin import admin_bp
 
+
 def create_app(config_name=None):
     if config_name is None:
         config_name = os.environ.get('FLASK_ENV', 'default')
@@ -30,7 +32,7 @@ def create_app(config_name=None):
     os.makedirs(app.config.get('SCREENSHOT_DIR', 'screenshots'), exist_ok=True)
 
     # 初始化扩展
-    CORS(app)
+    CORS(app, origins=os.environ.get('CORS_ORIGINS', '*').split(','))
     db.init_app(app)
     JWTManager(app)
 
@@ -55,10 +57,10 @@ def create_app(config_name=None):
         if len(password) < 6:
             return jsonify({'error': '密码至少6位'}), 400
 
-        if User.query.filter_by(username=username).first():
-            return jsonify({'error': '用户名已存在'}), 409
-        if User.query.filter_by(email=email).first():
-            return jsonify({'error': '邮箱已注册'}), 409
+        # 防用户枚举：统一错误信息
+        if User.query.filter_by(username=username).first() or \
+           User.query.filter_by(email=email).first():
+            return jsonify({'error': '用户名或邮箱已存在'}), 409
 
         user = User(username=username, email=email)
         user.set_password(password)
@@ -116,7 +118,8 @@ def create_app(config_name=None):
         if 'interpark_id' in data:
             user.interpark_id = data['interpark_id']
         if 'interpark_pw' in data:
-            user.interpark_pw_encrypted = data['interpark_pw']
+            # 加密存储，不再明文
+            user.set_interpark_pw(data['interpark_pw'])
         if 'weverse_id' in data:
             user.weverse_id = data['weverse_id']
         if 'has_presale' in data:
@@ -130,7 +133,6 @@ def create_app(config_name=None):
     @app.route('/api/ticket-classes', methods=['GET'])
     @login_required
     def list_ticket_classes():
-        """获取座位档位列表"""
         order_id = request.args.get('order_id', type=int)
         q = TicketClass.query
         if order_id:
@@ -143,21 +145,34 @@ def create_app(config_name=None):
     @app.route('/api/ticket-classes', methods=['POST'])
     @login_required
     def create_ticket_class():
-        """创建座位档位"""
         data = request.get_json()
         if not data:
             return jsonify({'error': '请求体为空'}), 400
 
+        name = data.get('name', '').strip()
+        if not name:
+            return jsonify({'error': '请填写档位名称'}), 400
+        if len(name) > 100:
+            return jsonify({'error': '档位名称过长（最多100字符）'}), 400
+
+        price = data.get('price', 0)
+        if not isinstance(price, (int, float)) or price < 0:
+            return jsonify({'error': '价格必须为非负数'}), 400
+
+        grade_index = data.get('grade_index', 0)
+        if not isinstance(grade_index, int) or grade_index < 0:
+            return jsonify({'error': '档位编号必须为非负整数'}), 400
+
         tc = TicketClass(
             order_id=data.get('order_id'),
-            name=data.get('name', ''),
-            grade_index=data.get('grade_index', 0),
-            price=data.get('price', 0),
+            name=name,
+            grade_index=grade_index,
+            price=int(price),
             currency=data.get('currency', 'KRW'),
-            ticket_per_person=data.get('ticket_per_person', 1),
-            total_seats=data.get('total_seats', 0),
-            available_seats=data.get('available_seats', data.get('total_seats', 0)),
-            is_sold_out=data.get('is_sold_out', False),
+            ticket_per_person=max(1, data.get('ticket_per_person', 1)),
+            total_seats=max(0, data.get('total_seats', 0)),
+            available_seats=max(0, data.get('available_seats', data.get('total_seats', 0))),
+            is_sold_out=bool(data.get('is_sold_out', False)),
             color=data.get('color', '#7c5cfc'),
             icon=data.get('icon', '🎫'),
         )
@@ -168,7 +183,6 @@ def create_app(config_name=None):
     @app.route('/api/ticket-classes/<int:tc_id>', methods=['PUT'])
     @login_required
     def update_ticket_class(tc_id):
-        """更新座位档位"""
         tc = db.session.get(TicketClass, tc_id)
         if not tc:
             return jsonify({'error': '档位不存在'}), 404
@@ -186,7 +200,6 @@ def create_app(config_name=None):
     @app.route('/api/ticket-classes/<int:tc_id>', methods=['DELETE'])
     @login_required
     def delete_ticket_class(tc_id):
-        """删除座位档位"""
         tc = db.session.get(TicketClass, tc_id)
         if not tc:
             return jsonify({'error': '档位不存在'}), 404
@@ -199,7 +212,6 @@ def create_app(config_name=None):
     @app.route('/api/accounts', methods=['GET'])
     @login_required
     def list_accounts():
-        """获取用户的账号列表"""
         user_id = int(get_jwt_identity())
         order_id = request.args.get('order_id', type=int)
         q = Account.query.filter_by(user_id=user_id)
@@ -211,7 +223,6 @@ def create_app(config_name=None):
     @app.route('/api/accounts', methods=['POST'])
     @login_required
     def create_account():
-        """添加账号"""
         user_id = int(get_jwt_identity())
         data = request.get_json()
         if not data:
@@ -222,7 +233,6 @@ def create_app(config_name=None):
         if not email or not password:
             return jsonify({'error': '请填写邮箱和密码'}), 400
 
-        # 自动计算序号
         order_id = data.get('order_id')
         max_no = db.session.query(db.func.max(Account.no)).filter_by(user_id=user_id).scalar() or 0
 
@@ -231,12 +241,14 @@ def create_app(config_name=None):
             order_id=order_id,
             no=max_no + 1,
             email=email,
-            password=password,
             proxy=data.get('proxy', ''),
-            card_no=data.get('card_no', ''),
-            card_cvv=data.get('card_cvv', ''),
             wrid=data.get('wrid', ''),
         )
+        # 加密存储
+        account.set_password(password)
+        account.set_card_no(data.get('card_no', ''))
+        account.set_card_cvv(data.get('card_cvv', ''))
+
         db.session.add(account)
         db.session.commit()
         return jsonify({'message': '账号已添加', 'account': account.to_dict()}), 201
@@ -244,17 +256,22 @@ def create_app(config_name=None):
     @app.route('/api/accounts/<int:acc_id>', methods=['PUT'])
     @login_required
     def update_account(acc_id):
-        """更新账号"""
         user_id = int(get_jwt_identity())
         acc = Account.query.filter_by(id=acc_id, user_id=user_id).first()
         if not acc:
             return jsonify({'error': '账号不存在'}), 404
 
         data = request.get_json()
-        updatable = ['email', 'password', 'proxy', 'card_no', 'card_cvv', 'wrid', 'status', 'order_id']
-        for key in updatable:
+        for key in ['email', 'proxy', 'wrid', 'status', 'order_id']:
             if key in data and data[key] is not None:
                 setattr(acc, key, data[key])
+        # 加密字段单独处理
+        if 'password' in data and data['password'] is not None:
+            acc.set_password(data['password'])
+        if 'card_no' in data and data['card_no'] is not None:
+            acc.set_card_no(data['card_no'])
+        if 'card_cvv' in data and data['card_cvv'] is not None:
+            acc.set_card_cvv(data['card_cvv'])
 
         db.session.commit()
         return jsonify({'message': '更新成功', 'account': acc.to_dict()})
@@ -262,7 +279,6 @@ def create_app(config_name=None):
     @app.route('/api/accounts/<int:acc_id>', methods=['DELETE'])
     @login_required
     def delete_account(acc_id):
-        """删除账号"""
         user_id = int(get_jwt_identity())
         acc = Account.query.filter_by(id=acc_id, user_id=user_id).first()
         if not acc:
@@ -274,7 +290,6 @@ def create_app(config_name=None):
     @app.route('/api/accounts/batch', methods=['POST'])
     @login_required
     def batch_create_accounts():
-        """批量导入账号 (JSON 数组)"""
         user_id = int(get_jwt_identity())
         data = request.get_json()
         if not isinstance(data, list):
@@ -291,12 +306,12 @@ def create_app(config_name=None):
                 order_id=item.get('order_id'),
                 no=max_no,
                 email=item['email'],
-                password=item['password'],
                 proxy=item.get('proxy', ''),
-                card_no=item.get('card_no', ''),
-                card_cvv=item.get('card_cvv', ''),
                 wrid=item.get('wrid', ''),
             )
+            acc.set_password(item['password'])
+            acc.set_card_no(item.get('card_no', ''))
+            acc.set_card_cvv(item.get('card_cvv', ''))
             db.session.add(acc)
             created += 1
 
@@ -308,7 +323,6 @@ def create_app(config_name=None):
     @app.route('/api/orders/<int:order_id>/get-block', methods=['POST'])
     @login_required
     def get_block_no(order_id):
-        """获取票务区块编号"""
         user_id = int(get_jwt_identity())
         order = Order.query.filter_by(id=order_id, user_id=user_id).first()
         if not order:
@@ -322,15 +336,15 @@ def create_app(config_name=None):
         if not goods_code:
             return jsonify({'error': '请填写商品编码'}), 400
 
-        # 更新订单
         order.goods_code = goods_code
         order.place_code = place_code
         order.seat_mode = seat_mode
         db.session.commit()
 
-        # 模拟获取 blockNo（实际需对接 Interpark API）
-        import hashlib
-        block_hash = hashlib.md5(f"{goods_code}:{place_code}:{seat_mode}".encode()).hexdigest()[:8]
+        # 用 SHA-256 代替 MD5
+        block_hash = hashlib.sha256(
+            f"{goods_code}:{place_code}:{seat_mode}".encode()
+        ).hexdigest()[:8]
         order.block_no = block_hash
         db.session.commit()
 
@@ -347,7 +361,6 @@ def create_app(config_name=None):
     @app.route('/api/orders/<int:order_id>/ding/init', methods=['POST'])
     @login_required
     def ding_init(order_id):
-        """初始化钉钉通知"""
         user_id = int(get_jwt_identity())
         order = Order.query.filter_by(id=order_id, user_id=user_id).first()
         if not order:
@@ -364,7 +377,6 @@ def create_app(config_name=None):
         # 发送测试消息
         try:
             import urllib.request
-            import urllib.parse
             msg_data = json.dumps({
                 'msgtype': 'text',
                 'text': {'content': f'🎫 YAOLO 抢票系统已连接\n订单 #{order.id} 钉钉通知已启用'}
@@ -378,7 +390,6 @@ def create_app(config_name=None):
     @app.route('/api/orders/<int:order_id>/ding/push', methods=['POST'])
     @login_required
     def ding_push(order_id):
-        """推送钉钉通知"""
         user_id = int(get_jwt_identity())
         order = Order.query.filter_by(id=order_id, user_id=user_id).first()
         if not order:
@@ -427,7 +438,7 @@ def create_app(config_name=None):
     with app.app_context():
         db.create_all()
 
-        # 创建默认管理员
+        # 创建默认管理员（密码仅在首次创建时使用默认值）
         admin = User.query.filter_by(username='admin').first()
         if not admin:
             admin_pw = os.environ.get('ADMIN_PASSWORD', 'admin123')
@@ -435,8 +446,11 @@ def create_app(config_name=None):
             admin.set_password(admin_pw)
             db.session.add(admin)
             db.session.commit()
+            if admin_pw == 'admin123':
+                import warnings
+                warnings.warn('⚠️ 使用默认管理员密码，请立即修改！')
 
-        # 创建默认座位档位（如果不存在）
+        # 创建默认座位档位
         if TicketClass.query.filter_by(order_id=None).count() == 0:
             defaults = [
                 {'name': 'VIP 站席', 'grade_index': 0, 'price': 154000, 'color': '#ef4444', 'icon': '🔥'},
@@ -455,9 +469,11 @@ def create_app(config_name=None):
 
 if __name__ == '__main__':
     app = create_app()
-    print("🎫 Weverse Con 2026 抢票系统启动")
-    print("📡 http://localhost:5000")
-    print("👤 管理员: admin / admin123")
-    # 用 --no-reload 避免 debug reloader 导致 JWT secret 不一致
+    port = int(os.environ.get('PORT', 5000))
     use_reloader = os.environ.get('FLASK_RELOADER', 'true').lower() == 'true'
-    app.run(host='0.0.0.0', port=5000, debug=True, use_reloader=use_reloader)
+
+    if os.environ.get('ADMIN_PASSWORD', 'admin123') == 'admin123':
+        import warnings
+        warnings.warn('⚠️ 使用默认管理员密码 admin123，生产环境请通过 ADMIN_PASSWORD 环境变量修改！')
+
+    app.run(host='0.0.0.0', port=port, debug=True, use_reloader=use_reloader)

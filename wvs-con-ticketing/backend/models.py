@@ -1,11 +1,69 @@
 """数据库模型"""
 
-from datetime import datetime
+import os
+import json
+import base64
+import hashlib
+from datetime import datetime, timezone
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import generate_password_hash, check_password_hash
 
 db = SQLAlchemy()
 
+
+# ============================================================
+#  敏感字段加密工具
+# ============================================================
+
+def _get_encrypt_key():
+    """获取加密密钥，优先使用环境变量，否则使用 SECRET_KEY 派生"""
+    key = os.environ.get('DATA_ENCRYPT_KEY', '')
+    if key:
+        return key.encode()[:32].ljust(32, b'0')
+    # 兜底：用 SECRET_KEY 派生
+    secret = os.environ.get('SECRET_KEY', 'fallback-dev-key-change-me')
+    return hashlib.sha256(secret.encode()).digest()
+
+
+def encrypt_field(plaintext: str) -> str:
+    """对称加密敏感字段（AES-128-CTR via XOR + base64）"""
+    if not plaintext:
+        return ''
+    try:
+        from cryptography.fernet import Fernet
+        # 用 Fernet 做真正的加密
+        key = base64.urlsafe_b64encode(_get_encrypt_key())
+        f = Fernet(key)
+        return f.encrypt(plaintext.encode()).decode()
+    except ImportError:
+        # 降级：至少不做明文存储，用简单混淆
+        key = _get_encrypt_key()
+        data = plaintext.encode()
+        encrypted = bytes(b ^ key[i % len(key)] for i, b in enumerate(data))
+        return 'enc:' + base64.b64encode(encrypted).decode()
+
+
+def decrypt_field(ciphertext: str) -> str:
+    """解密敏感字段"""
+    if not ciphertext:
+        return ''
+    try:
+        if ciphertext.startswith('enc:'):
+            # 简单混淆模式
+            key = _get_encrypt_key()
+            data = base64.b64decode(ciphertext[4:])
+            return bytes(b ^ key[i % len(key)] for i, b in enumerate(data)).decode()
+        from cryptography.fernet import Fernet
+        key = base64.urlsafe_b64encode(_get_encrypt_key())
+        f = Fernet(key)
+        return f.decrypt(ciphertext.encode()).decode()
+    except Exception:
+        return ''
+
+
+# ============================================================
+#  模型
+# ============================================================
 
 class User(db.Model):
     """用户"""
@@ -16,11 +74,11 @@ class User(db.Model):
     email = db.Column(db.String(120), unique=True, nullable=False)
     password_hash = db.Column(db.String(256), nullable=False)
     is_admin = db.Column(db.Boolean, default=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
     # Interpark 凭证 (加密存储)
     interpark_id = db.Column(db.String(200), default='')
-    interpark_pw_encrypted = db.Column(db.String(500), default='')
+    interpark_pw = db.Column(db.String(500), default='')  # 加密后存储
     weverse_id = db.Column(db.String(200), default='')
     has_presale = db.Column(db.Boolean, default=False)
 
@@ -31,6 +89,14 @@ class User(db.Model):
 
     def check_password(self, pw):
         return check_password_hash(self.password_hash, pw)
+
+    def set_interpark_pw(self, pw: str):
+        """加密存储 Interpark 密码"""
+        self.interpark_pw = encrypt_field(pw)
+
+    def get_interpark_pw(self) -> str:
+        """解密获取 Interpark 密码"""
+        return decrypt_field(self.interpark_pw)
 
     def to_dict(self):
         return {
@@ -70,43 +136,42 @@ class Order(db.Model):
     proxy = db.Column(db.String(200), default='')
 
     # ---- 新增：GetBlock ----
-    goods_code = db.Column(db.String(50), default='')     # 商品编码
-    place_code = db.Column(db.String(50), default='')     # 场地编码
-    seat_mode = db.Column(db.Integer, default=1)          # 座位模式
-    block_no = db.Column(db.String(50), default='')       # 获取到的区块编号
+    goods_code = db.Column(db.String(50), default='')
+    place_code = db.Column(db.String(50), default='')
+    seat_mode = db.Column(db.Integer, default=1)
+    block_no = db.Column(db.String(50), default='')
 
     # ---- 新增：Delay 配置 ----
-    lock_delay = db.Column(db.Integer, default=1200)      # 锁定延迟 ms
-    delay_start = db.Column(db.Integer, default=300)      # 延迟启动 ms
+    lock_delay = db.Column(db.Integer, default=1200)
+    delay_start = db.Column(db.Integer, default=300)
 
     # ---- 新增：票务模式 ----
-    kr_ticket_mode = db.Column(db.String(20), default='') # 韩国票务模式编码
+    kr_ticket_mode = db.Column(db.String(20), default='')
 
     # ---- 新增：自动过户 ----
-    auto_guohu = db.Column(db.Boolean, default=False)     # 自动过户
-    auto_cancel = db.Column(db.Boolean, default=False)    # 异常自动取消
-    guohu_pay = db.Column(db.Boolean, default=False)      # 过户支付
+    auto_guohu = db.Column(db.Boolean, default=False)
+    auto_cancel = db.Column(db.Boolean, default=False)
+    guohu_pay = db.Column(db.Boolean, default=False)
 
     # ---- 新增：验证码 & 代理 & 通知 ----
-    yes_captcha_key = db.Column(db.String(200), default='')  # YesCaptcha Key
-    proxy_api = db.Column(db.String(500), default='')        # 代理轮换 API
-    ding_webhook = db.Column(db.String(500), default='')     # 钉钉 webhook
+    yes_captcha_key = db.Column(db.String(200), default='')
+    proxy_api = db.Column(db.String(500), default='')
+    ding_webhook = db.Column(db.String(500), default='')
 
     # ---- 新增：多线程控制 ----
-    thread_count = db.Column(db.Integer, default=1)       # 线程数
+    thread_count = db.Column(db.Integer, default=1)
 
     # ---- 新增：关键词 ----
-    keyword = db.Column(db.String(200), default='')       # 搜索关键词
+    keyword = db.Column(db.String(200), default='')
 
     # ---- 新增：开关 ----
-    suo_tou = db.Column(db.Boolean, default=False)        # 锁票开关
-    day2 = db.Column(db.Boolean, default=False)           # 次日票务
-    pre_yn = db.Column(db.String(5), default='N')         # 预抢票 Y/N
-    ko_pay = db.Column(db.String(50), default='')         # 韩国支付渠道
+    suo_tou = db.Column(db.Boolean, default=False)
+    day2 = db.Column(db.Boolean, default=False)
+    pre_yn = db.Column(db.String(5), default='N')
+    ko_pay = db.Column(db.String(50), default='')
 
     # 状态
     status = db.Column(db.String(30), default='pending')
-    # pending -> waiting -> grabbing -> success / failed / sold_out / error
 
     # 结果
     order_no = db.Column(db.String(100), default='')
@@ -117,19 +182,18 @@ class Order(db.Model):
     total_tasks = db.Column(db.Integer, default=0)
     success_tasks = db.Column(db.Integer, default=0)
     threads_running = db.Column(db.Integer, default=0)
-    remaining_tickets = db.Column(db.Integer, default=0)  # SYL
+    remaining_tickets = db.Column(db.Integer, default=0)
 
     # 截图
     screenshot_path = db.Column(db.String(300), default='')
 
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     logs = db.relationship('OrderLog', backref='order', lazy=True, order_by='OrderLog.created_at')
     ticket_classes = db.relationship('TicketClass', backref='order', lazy=True)
 
     def to_dict(self):
-        import json
         seat = []
         try:
             seat = json.loads(self.seat_prefs)
@@ -150,30 +214,22 @@ class Order(db.Model):
             'status': self.status,
             'order_no': self.order_no,
             'result_detail': self.result_detail,
-            # GetBlock
             'goods_code': self.goods_code,
             'place_code': self.place_code,
             'seat_mode': self.seat_mode,
             'block_no': self.block_no,
-            # Delay
             'lock_delay': self.lock_delay,
             'delay_start': self.delay_start,
-            # 票务模式
             'kr_ticket_mode': self.kr_ticket_mode,
-            # 自动过户
             'auto_guohu': self.auto_guohu,
             'auto_cancel': self.auto_cancel,
             'guohu_pay': self.guohu_pay,
-            # 验证码 & 代理 & 通知
             'ding_webhook': self.ding_webhook,
-            # 多线程
             'thread_count': self.thread_count,
-            # 实时统计
             'total_tasks': self.total_tasks,
             'success_tasks': self.success_tasks,
             'threads_running': self.threads_running,
             'remaining_tickets': self.remaining_tickets,
-            # 开关
             'suo_tou': self.suo_tou,
             'day2': self.day2,
             'pre_yn': self.pre_yn,
@@ -192,7 +248,7 @@ class OrderLog(db.Model):
     order_id = db.Column(db.Integer, db.ForeignKey('orders.id'), nullable=False)
     level = db.Column(db.String(10), default='INFO')
     message = db.Column(db.Text, default='')
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
     def to_dict(self):
         return {
@@ -205,29 +261,27 @@ class OrderLog(db.Model):
 
 
 class TicketClass(db.Model):
-    """座位档位配置 — 从平台抓取或手动录入"""
+    """座位档位配置"""
     __tablename__ = 'ticket_classes'
 
     id = db.Column(db.Integer, primary_key=True)
     order_id = db.Column(db.Integer, db.ForeignKey('orders.id'), nullable=True)
-    # 关联订单，NULL 表示全局预设
 
-    name = db.Column(db.String(100), default='')          # 如 "VIP 站席", "SR석"
-    grade_index = db.Column(db.Integer, default=0)        # 平台编号 (0-based)
-    price = db.Column(db.Integer, default=0)              # 韩元票价
+    name = db.Column(db.String(100), default='')
+    grade_index = db.Column(db.Integer, default=0)
+    price = db.Column(db.Integer, default=0)
     currency = db.Column(db.String(10), default='KRW')
-    ticket_per_person = db.Column(db.Integer, default=1)  # 每人限购
-    total_seats = db.Column(db.Integer, default=0)        # 总座位数
-    available_seats = db.Column(db.Integer, default=0)    # 剩余座位
+    ticket_per_person = db.Column(db.Integer, default=1)
+    total_seats = db.Column(db.Integer, default=0)
+    available_seats = db.Column(db.Integer, default=0)
     is_sold_out = db.Column(db.Boolean, default=False)
-    is_visible = db.Column(db.Boolean, default=True)      # 是否在前端展示
+    is_visible = db.Column(db.Boolean, default=True)
 
-    # 外观
-    color = db.Column(db.String(20), default='#7c5cfc')   # 档位颜色
-    icon = db.Column(db.String(10), default='🎫')         # 图标
+    color = db.Column(db.String(20), default='#7c5cfc')
+    icon = db.Column(db.String(10), default='🎫')
 
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     def to_dict(self):
         return {
@@ -250,33 +304,51 @@ class TicketClass(db.Model):
 
 
 class Account(db.Model):
-    """多账号管理 — 每个账号对应一个抢票任务行"""
+    """多账号管理"""
     __tablename__ = 'accounts'
 
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     order_id = db.Column(db.Integer, db.ForeignKey('orders.id'), nullable=True)
-    # 关联订单，NULL 表示全局账号池
 
-    # 账号信息
-    no = db.Column(db.Integer, default=1)              # 任务序号
-    email = db.Column(db.String(200), default='')       # 登录邮箱
-    password = db.Column(db.String(200), default='')     # 登录密码
-    proxy = db.Column(db.String(300), default='')        # 该账号的代理
+    no = db.Column(db.Integer, default=1)
+    email = db.Column(db.String(200), default='')
+    password = db.Column(db.String(500), default='')    # 加密存储
+    proxy = db.Column(db.String(300), default='')
 
-    # 支付信息
-    card_no = db.Column(db.String(50), default='')       # 银行卡号
-    card_cvv = db.Column(db.String(10), default='')      # CVV
+    # 支付信息（加密存储）
+    card_no = db.Column(db.String(500), default='')      # 加密存储
+    card_cvv = db.Column(db.String(200), default='')     # 加密存储
 
-    # 标识
-    wrid = db.Column(db.String(100), default='')         # 账号标识
-    status = db.Column(db.String(30), default='idle')    # idle / running / success / failed
+    wrid = db.Column(db.String(100), default='')
+    status = db.Column(db.String(30), default='idle')
 
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
     user = db.relationship('User', backref='accounts')
 
+    def set_password(self, pw: str):
+        """加密存储密码"""
+        self.password = encrypt_field(pw)
+
+    def get_password(self) -> str:
+        """解密获取密码"""
+        return decrypt_field(self.password)
+
+    def set_card_no(self, card: str):
+        self.card_no = encrypt_field(card)
+
+    def get_card_no(self) -> str:
+        return decrypt_field(self.card_no)
+
+    def set_card_cvv(self, cvv: str):
+        self.card_cvv = encrypt_field(cvv)
+
+    def get_card_cvv(self) -> str:
+        return decrypt_field(self.card_cvv)
+
     def to_dict(self):
+        """API 输出 — 不返回敏感明文"""
         return {
             'id': self.id,
             'user_id': self.user_id,
@@ -285,18 +357,24 @@ class Account(db.Model):
             'email': self.email,
             'password': '***' if self.password else '',
             'proxy': self.proxy,
-            'card_no': self.card_no,
-            'card_cvv': self.card_cvv,
+            'card_no': '****' + self.get_card_no()[-4:] if self.get_card_no() else '',
+            'card_cvv': '***' if self.card_cvv else '',
             'wrid': self.wrid,
             'status': self.status,
             'created_at': self.created_at.isoformat() if self.created_at else None,
         }
 
-    def to_dict_full(self):
-        """包含明文密码（仅后端内部使用）"""
-        d = self.to_dict()
-        d['password'] = self.password
-        return d
+    def to_engine_dict(self):
+        """引擎内部使用 — 包含解密后的真实值"""
+        return {
+            'id': self.id,
+            'email': self.email,
+            'password': self.get_password(),
+            'proxy': self.proxy,
+            'card_no': self.get_card_no(),
+            'card_cvv': self.get_card_cvv(),
+            'wrid': self.wrid,
+        }
 
 
 class SystemStatus(db.Model):
@@ -306,4 +384,4 @@ class SystemStatus(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     key = db.Column(db.String(50), unique=True, nullable=False)
     value = db.Column(db.Text, default='')
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))

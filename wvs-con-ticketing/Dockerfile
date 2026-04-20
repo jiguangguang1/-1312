@@ -21,7 +21,7 @@ RUN mkdir -p logs screenshots
 EXPOSE 5000
 
 ENV FLASK_ENV=production
-ENV ADMIN_PASSWORD=admin123
+# ⚠️ 不再硬编码 ADMIN_PASSWORD — 必须通过 .env 或 docker-compose 环境变量传入
 
 HEALTHCHECK --interval=30s --timeout=5s \
     CMD curl -f http://localhost:5000/api/health || exit 1

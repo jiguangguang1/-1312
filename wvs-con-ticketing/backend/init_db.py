@@ -13,16 +13,16 @@ app = create_app()
 with app.app_context():
     db.create_all()
 
-    # 创建管理员账号
+    # 创建默认管理员
     admin = User.query.filter_by(username='admin').first()
     if not admin:
         admin_pw = os.environ.get('ADMIN_PASSWORD', 'admin123')
         admin = User(username='admin', email='admin@wvs.local', is_admin=True)
         admin.set_password(admin_pw)
         db.session.add(admin)
-        print(f"✅ 创建管理员账号: admin / {admin_pw}")
+        print(f"✅ 管理员账号已创建 (admin)")
     else:
-        print("ℹ️ 管理员已存在")
+        print("✅ 管理员账号已存在")
 
     # 创建默认座位档位
     if TicketClass.query.filter_by(order_id=None).count() == 0:
@@ -36,9 +36,9 @@ with app.app_context():
         ]
         for d in defaults:
             db.session.add(TicketClass(**d, order_id=None))
-        print("✅ 创建默认座位档位")
+        print("✅ 默认座位档位已创建")
     else:
-        print("ℹ️ 座位档位已存在")
+        print("✅ 座位档位已存在")
 
     db.session.commit()
     print("✅ 数据库初始化完成")

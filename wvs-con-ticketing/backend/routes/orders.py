@@ -1,7 +1,7 @@
 """订单 API 路由"""
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from flask import Blueprint, request, jsonify, current_app
 from flask_jwt_extended import get_jwt_identity
 
@@ -10,15 +10,16 @@ from models import db, Order, OrderLog, User, TicketClass
 
 orders_bp = Blueprint('orders', __name__, url_prefix='/api/orders')
 
+MAX_PER_PAGE = 100
+
 
 @orders_bp.route('', methods=['GET'])
 @login_required
 def list_orders():
-    """获取用户的订单列表"""
     user_id = int(get_jwt_identity())
     status_filter = request.args.get('status')
     page = request.args.get('page', 1, type=int)
-    per_page = request.args.get('per_page', 20, type=int)
+    per_page = min(request.args.get('per_page', 20, type=int), MAX_PER_PAGE)
 
     query = Order.query.filter_by(user_id=user_id)
     if status_filter:
@@ -38,7 +39,6 @@ def list_orders():
 @orders_bp.route('', methods=['POST'])
 @login_required
 def create_order():
-    """创建抢票订单"""
     user_id = int(get_jwt_identity())
     data = request.get_json()
 
@@ -73,7 +73,6 @@ def create_order():
         tab_count=data.get('tab_count', 4),
         proxy=data.get('proxy', ''),
         status='pending',
-        # 新增字段
         goods_code=data.get('goods_code', ''),
         place_code=data.get('place_code', ''),
         seat_mode=data.get('seat_mode', 1),
@@ -110,21 +109,23 @@ def create_order():
 @orders_bp.route('/<int:order_id>', methods=['GET'])
 @login_required
 def get_order(order_id):
-    """获取订单详情"""
     user_id = int(get_jwt_identity())
     order = Order.query.filter_by(id=order_id, user_id=user_id).first()
     if not order:
         return jsonify({'error': '订单不存在'}), 404
 
     data = order.to_dict()
-    data['logs'] = [l.to_dict() for l in order.logs[-50:]]
+    # 用 query + LIMIT 加载最近 50 条日志，而不是加载全部
+    recent_logs = OrderLog.query.filter_by(order_id=order_id) \
+        .order_by(OrderLog.created_at.desc()) \
+        .limit(50).all()
+    data['logs'] = [l.to_dict() for l in recent_logs]
     return jsonify(data)
 
 
 @orders_bp.route('/<int:order_id>', methods=['PUT'])
 @login_required
 def update_order(order_id):
-    """更新订单配置（仅 pending 状态）"""
     user_id = int(get_jwt_identity())
     order = Order.query.filter_by(id=order_id, user_id=user_id).first()
     if not order:
@@ -156,7 +157,6 @@ def update_order(order_id):
 @orders_bp.route('/<int:order_id>', methods=['DELETE'])
 @login_required
 def delete_order(order_id):
-    """删除订单"""
     user_id = int(get_jwt_identity())
     order = Order.query.filter_by(id=order_id, user_id=user_id).first()
     if not order:
@@ -174,7 +174,6 @@ def delete_order(order_id):
 @orders_bp.route('/<int:order_id>/start', methods=['POST'])
 @login_required
 def start_grabber(order_id):
-    """手动启动抢票"""
     user_id = int(get_jwt_identity())
     order = Order.query.filter_by(id=order_id, user_id=user_id).first()
     if not order:
@@ -205,10 +204,9 @@ def start_grabber(order_id):
         'pre_open_sec': 3,
         'proxy': order.proxy,
         'interpark_id': user.interpark_id if user else '',
-        'interpark_pw': user.interpark_pw_encrypted if user else '',
+        'interpark_pw': user.get_interpark_pw() if user else '',  # 解密获取
         'presale_time': order.presale_time,
         'ticket_classes': tc_map,
-        # 新增配置
         'goods_code': order.goods_code,
         'place_code': order.place_code,
         'seat_mode': order.seat_mode,
@@ -235,7 +233,9 @@ def start_grabber(order_id):
     if time_str:
         try:
             if len(time_str) <= 8:
-                target_time = datetime.strptime(f"{datetime.now():%Y-%m-%d} {time_str}", '%Y-%m-%d %H:%M:%S')
+                target_time = datetime.strptime(
+                    f"{datetime.now():%Y-%m-%d} {time_str}", '%Y-%m-%d %H:%M:%S'
+                )
             else:
                 target_time = datetime.strptime(time_str, '%Y-%m-%d %H:%M:%S')
         except ValueError:
@@ -245,15 +245,16 @@ def start_grabber(order_id):
     order.status = 'grabbing'
     db.session.commit()
 
+    # 在独立线程中运行，复制 Flask app 引用避免上下文丢失
+    flask_app = current_app._get_current_object()
+
     def run_in_thread():
-        from flask import current_app
-        from grabber.engine import GrabberEngine
-        app = current_app._get_current_object()
-        with app.app_context():
+        with flask_app.app_context():
+            from grabber.engine import GrabberEngine
             engine = GrabberEngine(order_id, config)
             engine.run(target_time)
 
-    t = threading.Thread(target=run_in_thread, daemon=True)
+    t = threading.Thread(target=run_in_thread, daemon=True, name=f'grabber-{order_id}')
     t.start()
     return jsonify({'message': '抢票已启动', 'target_time': str(target_time) if target_time else 'immediate'})
 
@@ -261,14 +262,13 @@ def start_grabber(order_id):
 @orders_bp.route('/<int:order_id>/logs', methods=['GET'])
 @login_required
 def get_order_logs(order_id):
-    """获取订单日志"""
     user_id = int(get_jwt_identity())
     order = Order.query.filter_by(id=order_id, user_id=user_id).first()
     if not order:
         return jsonify({'error': '订单不存在'}), 404
 
     page = request.args.get('page', 1, type=int)
-    per_page = request.args.get('per_page', 50, type=int)
+    per_page = min(request.args.get('per_page', 50, type=int), MAX_PER_PAGE)
 
     logs = OrderLog.query.filter_by(order_id=order_id) \
         .order_by(OrderLog.created_at.desc()) \

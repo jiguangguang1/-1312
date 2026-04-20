@@ -9,7 +9,7 @@ import logging
 import threading
 import urllib.request
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Dict, List
 
 logger = logging.getLogger("grabber.engine")
@@ -109,7 +109,7 @@ class GrabberEngine:
             if order:
                 for k, v in kwargs.items():
                     setattr(order, k, v)
-                order.updated_at = datetime.utcnow()
+                order.updated_at = datetime.now(timezone.utc)
                 session.commit()
         except Exception:
             session.rollback()
@@ -996,8 +996,9 @@ class TicketManager:
 
 class AsyncGrabberEngine:
     """
-    基于 asyncio 的并发抢票引擎
-    使用 TicketManager 管理多档位同时抢票
+    基于 asyncio + Playwright async_api 的并发抢票引擎
+    每个座位档位独立一个 browser context，真正并发抢票
+    第一个成功的档位会通知其他档位立即停止
     """
 
     def __init__(self, order_id: int, config: dict, db_session=None):
@@ -1005,9 +1006,14 @@ class AsyncGrabberEngine:
         self.cfg = config
         self.db = db_session
         self.manager = TicketManager()
+        self.pw = None          # playwright instance
+        self.browser = None     # shared browser
         self._won = False
         self._winner_grade = None
+        self._lock = asyncio.Lock()
         self._logs = []
+
+    # ──────────────── 基础工具 ────────────────
 
     def _get_db(self):
         if self.db:
@@ -1043,95 +1049,820 @@ class AsyncGrabberEngine:
             if order:
                 for k, v in kwargs.items():
                     setattr(order, k, v)
-                order.updated_at = datetime.utcnow()
+                order.updated_at = datetime.now(timezone.utc)
                 session.commit()
         except Exception:
             session.rollback()
 
+    async def _mark_win(self, grade_index: int, order_no: str = ''):
+        async with self._lock:
+            if not self._won:
+                self._won = True
+                self._winner_grade = grade_index
+                self._update_order(status='success', order_no=order_no)
+
+    @property
+    def won(self):
+        return self._won
+
     def register_ticket_type(self, grade_index: int, name: str, price: int, ticket_per_person: int = 1):
-        """注册一个座位档位"""
         return self.manager.add(grade_index, name, price, ticket_per_person)
 
-    def schedule(self):
-        """调度所有档位并发抢票"""
-        async def _grab_one(tt: TicketType):
-            """单个档位的抢票逻辑"""
-            for attempt in range(tt.ticket_per_person):
-                if self._won:
-                    return 'other_won'
-                try:
-                    self.log('info', f'[{tt.name}] 第{attempt+1}次尝试...')
-                    tt._attempts += 1
-                    await asyncio.sleep(0.01)
-                except Exception as e:
-                    self.log('error', f'[{tt.name}] 异常: {e}')
-                    return 'error'
-            return 'attempt_done'
+    # ──────────────── 异步浏览器操作 ────────────────
 
-        # 为每个档位创建 worker
-        for tt in self.manager.available_types():
-            tt.add_worker(_grab_one(tt))
+    async def _start_browser(self):
+        from playwright.async_api import async_playwright
+        self.pw = await async_playwright().start()
+        proxy = self.cfg.get('proxy', '')
+        launch_args = {
+            'headless': self.cfg.get('headless', True),
+            'args': [
+                '--disable-blink-features=AutomationControlled',
+                '--no-sandbox', '--disable-dev-shm-usage',
+                '--disable-infobars', '--disable-extensions',
+            ],
+        }
+        if proxy:
+            launch_args['proxy'] = {"server": proxy}
+        self.browser = await self.pw.chromium.launch(**launch_args)
+        self.log('info', '浏览器已启动')
+
+    async def _new_context(self):
+        """为每个档位创建独立 context（独立 cookie/登录态）"""
+        ctx_opts = {
+            'viewport': {'width': 1366, 'height': 768},
+            'user_agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+                          'AppleWebKit/537.36 (KHTML, like Gecko) '
+                          'Chrome/131.0.0.0 Safari/537.36',
+            'locale': 'ko-KR',
+            'timezone_id': 'Asia/Seoul',
+            'ignore_https_errors': True,
+        }
+        state_file = f"state_order_{self.order_id}.json"
+        if os.path.exists(state_file):
+            ctx_opts['storage_state'] = state_file
+            self.log('info', f'加载登录态: {state_file}')
+        ctx = await self.browser.new_context(**ctx_opts)
+        await ctx.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            delete navigator.__proto__.webdriver;
+            window.chrome = {runtime: {}, loadTimes: function(){}, csi: function(){}};
+            Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
+            Object.defineProperty(navigator, 'languages', {get: () => ['ko-KR','ko','en-US','en']});
+        """)
+        return ctx
+
+    async def _async_click(self, page, selectors: list, timeout: int = 2000) -> bool:
+        for sel in selectors:
+            try:
+                if sel.startswith('text=') or 'has-text' in sel:
+                    await page.locator(sel).first.click(timeout=timeout)
+                else:
+                    await page.click(sel, timeout=timeout)
+                return True
+            except Exception:
+                continue
+        return False
+
+    async def _async_fill(self, page, selectors: list, value: str) -> bool:
+        for sel in selectors:
+            try:
+                await page.fill(sel, value, timeout=2000)
+                return True
+            except Exception:
+                continue
+        return False
+
+    async def _async_click_nth(self, page, selector: str, index: int) -> bool:
+        try:
+            els = await page.query_selector_all(selector)
+            if els and len(els) > index:
+                await els[index].click()
+                return True
+        except Exception:
+            pass
+        return False
+
+    async def _async_shot(self, page, name: str):
+        os.makedirs("screenshots", exist_ok=True)
+        p = f"screenshots/async_order{self.order_id}_{name}_{datetime.now():%H%M%S}.png"
+        try:
+            await page.screenshot(path=p, full_page=True)
+        except Exception:
+            pass
+        return p
+
+    # ──────────────── 异步登录 ────────────────
+
+    async def _async_login(self) -> bool:
+        self.log('info', '🔐 登录 Interpark...')
+        interpark_id = self.cfg.get('interpark_id', '')
+        interpark_pw = self.cfg.get('interpark_pw', '')
+
+        if not interpark_id:
+            ctx = await self._new_context()
+            page = await ctx.new_page()
+            page.set_default_timeout(self.cfg.get('page_timeout', 10000))
+            await page.goto("https://tickets.interpark.com")
+            await asyncio.sleep(2)
+            if 'login' not in page.url.lower():
+                self.log('info', '✅ 已有登录态')
+                # 保存 state 给后续 context 用
+                state = await ctx.storage_state()
+                with open(f"state_order_{self.order_id}.json", 'w') as f:
+                    json.dump(state, f)
+                await ctx.close()
+                return True
+            self.log('error', '需要登录但未配置 Interpark 账号')
+            await ctx.close()
+            return False
+
+        ctx = await self._new_context()
+        page = await ctx.new_page()
+        page.set_default_timeout(self.cfg.get('page_timeout', 10000))
+        await page.goto("https://accounts.interpark.com/login")
+        await asyncio.sleep(2)
+
+        await self._async_fill(page, [
+            '#userId', 'input[name="userId"]', 'input[id="id"]',
+            'input[placeholder*="아이디"]'
+        ], interpark_id)
+
+        await self._async_fill(page, [
+            '#userPwd', 'input[name="userPwd"]', 'input[type="password"]'
+        ], interpark_pw)
+
+        await asyncio.sleep(0.5)
+        await self._async_click(page, [
+            '#btn_login', 'button:has-text("로그인")',
+            'button[type="submit"]', '.btn_login'
+        ])
+        await asyncio.sleep(3)
+
+        if 'login' in page.url.lower() or 'account' in page.url.lower():
+            await self._async_shot(page, 'login_failed')
+            self.log('error', '❌ 登录失败')
+            await ctx.close()
+            return False
+
+        # 保存登录态
+        state = await ctx.storage_state()
+        with open(f"state_order_{self.order_id}.json", 'w') as f:
+            json.dump(state, f)
+        self.log('info', '✅ 登录成功')
+        await ctx.close()
+        return True
+
+    # ──────────────── 异步抢票流程 ────────────────
+
+    async def _async_goto_perf(self, page) -> bool:
+        url = self.cfg.get('perf_url', '')
+        if not url:
+            self.log('error', '未配置演出 URL')
+            return False
+        try:
+            await page.goto(url, wait_until='domcontentloaded', timeout=15000)
+        except Exception as e:
+            self.log('warning', f'页面加载慢: {e}')
+        await asyncio.sleep(2)
+        return True
+
+    async def _async_pick_schedule(self, page, idx: int):
+        self.log('info', f'📅 选择第 {idx + 1} 场')
+        for sel in ['.schedule_list li', '.date_list li', '#scheduleList li',
+                    '.tab_list li', '.sch_list li']:
+            if await self._async_click_nth(page, sel, idx):
+                self.log('info', '✅ 场次已选择')
+                return
+        for sel in ['#scheduleNo', 'select[name="scheduleNo"]', '#goodsSelect']:
+            try:
+                opts = await page.query_selector_all(f'{sel} option')
+                if opts and len(opts) > idx:
+                    val = await opts[idx].get_attribute('value')
+                    await page.select_option(sel, val)
+                    self.log('info', '✅ 场次下拉已选择')
+                    return
+            except Exception:
+                continue
+
+    async def _async_click_booking(self, page) -> bool:
+        self.log('info', '🛒 点击预约...')
+        booking_sels = [
+            'text=예매하기', 'text=바로예매', 'text=예매',
+            '#btnBooking', '.btn_booking', '.btn-reserve',
+            'a[href*="Booking"]', 'button:has-text("예매")',
+            'button:has-text("바로")', 'a:has-text("예매")',
+        ]
+        max_retries = self.cfg.get('max_click_retries', 100)
+        delay = self.cfg.get('click_delay', 0.05)
+        lock_delay_ms = self.cfg.get('lock_delay', 0)
+
+        for attempt in range(max_retries):
+            if self.won:
+                return False
+            if await self._async_click(page, booking_sels, timeout=300):
+                self.log('info', f'✅ 预约按钮已点击 (第{attempt + 1}次)')
+                if lock_delay_ms > 0:
+                    lock_delay_sec = lock_delay_ms / 1000.0
+                    self.log('info', f'⏳ 锁定延迟 {lock_delay_ms}ms...')
+                    await asyncio.sleep(lock_delay_sec)
+                await asyncio.sleep(2)
+                return True
+            await asyncio.sleep(delay)
+
+        # 兜底：遍历所有按钮/链接
+        try:
+            for btn in await page.query_selector_all('a, button'):
+                try:
+                    text = await btn.inner_text()
+                    if any(kw in text for kw in ['예매', '예약', '구매', '바로예매']):
+                        await btn.click()
+                        self.log('info', f'✅ 兜底点击: {text}')
+                        await asyncio.sleep(2)
+                        return True
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        await self._async_shot(page, 'no_booking')
+        self.log('error', '找不到预约按钮')
+        return False
+
+    async def _async_handle_popup(self, page, ctx) -> object:
+        """处理弹窗，返回新页面或 None"""
+        try:
+            pages = ctx.pages
+            if len(pages) > 1:
+                new_page = pages[-1]
+                await new_page.wait_for_load_state('domcontentloaded', timeout=8000)
+                self.log('info', f'🪟 新窗口: {new_page.url[:80]}')
+                return new_page
+        except Exception:
+            pass
+        return None
+
+    async def _async_pick_grade(self, page, grade_index: int, grade_name: str) -> bool:
+        """选择指定档位（本任务专属的档位）"""
+        self.log('info', f'🎯 选择档位: {grade_name} (index={grade_index})')
+
+        seat_sels = [
+            '.seat_grade_list li', '.grade_list li', '#seatGradeList li',
+            '.grade_item', '.seatGrade li', '.price_list li',
+            '#tblGrade tr', 'ul.seat_list li',
+        ]
+        for sel in seat_sels:
+            if await self._async_click_nth(page, sel, grade_index):
+                await asyncio.sleep(0.2)
+                # 检查是否售罄
+                try:
+                    els = await page.query_selector_all(sel)
+                    if els and grade_index < len(els):
+                        txt = await els[grade_index].inner_text()
+                        if any(k in txt for k in ['매진', '0석', 'Sold', '품절']):
+                            self.log('warning', f'{grade_name} 售罄')
+                            return False
+                except Exception:
+                    pass
+                self.log('info', f'✅ 等级 {grade_name} 已选择')
+                return True
+
+        # 下拉选择
+        for sel in ['#seatGradeNo', 'select[name="seatGradeNo"]', 'select.grade']:
+            try:
+                opts = await page.query_selector_all(f'{sel} option')
+                if opts and len(opts) > grade_index:
+                    txt = await opts[grade_index].inner_text()
+                    if any(k in txt for k in ['매진', '0석']):
+                        self.log('warning', f'{grade_name} 售罄')
+                        return False
+                    val = await opts[grade_index].get_attribute('value')
+                    await page.select_option(sel, val)
+                    self.log('info', f'✅ 下拉等级 {grade_name}')
+                    return True
+            except Exception:
+                continue
+
+        self.log('warning', f'{grade_name} 不可选')
+        return False
+
+    async def _async_pick_seat(self, page) -> bool:
+        self.log('info', '💺 选座...')
+        sels = [
+            '.seat:not(.sold):not(.disabled):not(.reserved)',
+            '.seat[status="available"]',
+            'td.seat.available',
+            'td.seat:not(.sold)',
+        ]
+        for sel in sels:
+            seats = await page.query_selector_all(sel)
+            if seats:
+                self.log('info', f'找到 {len(seats)} 个可选座')
+                mid = len(seats) // 2
+                for offset in range(len(seats)):
+                    for i in [mid + offset, mid - offset]:
+                        if 0 <= i < len(seats):
+                            try:
+                                await seats[i].click()
+                                self.log('info', '✅ 选座成功')
+                                return True
+                            except Exception:
+                                continue
+        self.log('info', '系统分配座位模式')
+        return True
+
+    async def _async_handle_captcha(self, page) -> bool:
+        sels = ['#captcha', '#Captcha', '.captcha_area', 'img[src*="captcha"]', '#captchaImage']
+        found = False
+        for sel in sels:
+            el = await page.query_selector(sel)
+            if el:
+                found = True
+                break
+        if not found:
+            return True
+
+        api_key = self.cfg.get('yes_captcha_key', '')
+        if not api_key:
+            await self._async_shot(page, 'captcha')
+            self.log('warning', '🔐 检测到验证码，无自动识别配置')
+            return True
+
+        self.log('info', '🔐 检测到验证码，尝试自动识别...')
+        captcha_path = f"screenshots/async_order{self.order_id}_captcha_{datetime.now():%H%M%S}.png"
+        try:
+            await el.screenshot(path=captcha_path)
+        except Exception:
+            await self._async_shot(page, 'captcha')
+            return True
+
+        try:
+            import base64 as b64mod
+            with open(captcha_path, 'rb') as f:
+                img_b64 = b64mod.b64encode(f.read()).decode()
+
+            create_data = json.dumps({
+                'clientKey': api_key,
+                'task': {'type': 'ImageToTextTask', 'body': img_b64}
+            }).encode()
+            req = urllib.request.Request(
+                'https://api.yescaptcha.com/createTask',
+                data=create_data,
+                headers={'Content-Type': 'application/json'}
+            )
+            resp = urllib.request.urlopen(req, timeout=30)
+            result = json.loads(resp.read())
+
+            if result.get('errorId') == 0 and result.get('solution', {}).get('text'):
+                captcha_text = result['solution']['text']
+                self.log('info', f'✅ 验证码识别: {captcha_text}')
+                input_sels = ['#captchaInput', '#captchaCode', 'input[name="captcha"]',
+                              'input[placeholder*="captcha"]', 'input[placeholder*="인증"]']
+                for sel in input_sels:
+                    try:
+                        await page.fill(sel, captcha_text, timeout=2000)
+                        self.log('info', '✅ 验证码已填入')
+                        return True
+                    except Exception:
+                        continue
+                self.log('warning', '已识别但找不到输入框')
+            else:
+                self.log('warning', f'验证码识别失败: {result.get("errorDescription", "?")}')
+        except Exception as e:
+            self.log('warning', f'验证码识别异常: {e}')
+
+        await self._async_shot(page, 'captcha_failed')
+        return True
+
+    async def _async_submit(self, page) -> bool:
+        self.log('info', '📤 提交订单...')
+        sels = [
+            '#btnSubmit', '#btnConfirm', '#btnNext',
+            'text=다음', 'text=확인', 'text=결제',
+            'text=예매확인', 'text=다음단계', 'text=결제하기', 'text=예매확정',
+            'button:has-text("다음")', 'button:has-text("확인")', 'button:has-text("결제")',
+        ]
+        for step in range(3):
+            if await self._async_click(page, sels, timeout=3000):
+                self.log('info', f'第{step + 1}步提交成功')
+                await asyncio.sleep(2)
+            else:
+                break
+        return True
+
+    async def _async_check_result(self, page) -> str:
+        await asyncio.sleep(2)
+        await self._async_shot(page, 'result')
+        content = await page.content()
+
+        if any(k in content for k in ['예매완료', '예매확인', '주문완료', '결제완료', '예매성공']):
+            self.log('info', '🎉🎉🎉 抢票成功！！！')
+            m = re.search(r'(?:주문|예매)(?:번호|확인)\s*[:\s]*(\d+)', content)
+            order_no = m.group(1) if m else ''
+            if order_no:
+                self.log('info', f'📋 订单号: {order_no}')
+            return order_no or 'success'
+
+        if any(k in content for k in ['매진', 'Sold Out', '좌석없음', '품절']):
+            self.log('error', '😢 已售罄')
+            return 'sold_out'
+
+        self.log('info', '状态未知')
+        return 'unknown'
+
+    async def _async_send_dingtalk(self, message: str):
+        webhook = self.cfg.get('ding_webhook', '')
+        if not webhook:
+            return
+        try:
+            data = json.dumps({
+                'msgtype': 'text',
+                'text': {'content': f'🎫 [订单#{self.order_id}] {message}'}
+            }).encode('utf-8')
+            req = urllib.request.Request(webhook, data=data, headers={'Content-Type': 'application/json'})
+            urllib.request.urlopen(req, timeout=5)
+            self.log('info', f'🔔 钉钉: {message[:50]}')
+        except Exception as e:
+            self.log('warning', f'钉钉发送失败: {e}')
+
+    # ──────────────── 单个档位的完整抢票流程 ────────────────
+
+    async def _grab_grade(self, tt: TicketType, ctx):
+        """
+        一个独立档位的完整异步抢票流程：
+        打开页面 → 选场次 → 点预约 → 选本档位 → 选座 → 验证码 → 提交 → 检查结果
+        """
+        page = await ctx.new_page()
+        page.set_default_timeout(self.cfg.get('page_timeout', 10000))
+        grade_name = tt.name
+        grade_index = tt.grade_index
+
+        try:
+            if self.won:
+                return 'other_won'
+
+            # 1. 打开演出页面
+            self.log('info', f'[{grade_name}] 打开页面...')
+            await self._async_goto_perf(page)
+
+            # 2. 搜索关键词
+            keyword = self.cfg.get('keyword', '')
+            if keyword:
+                await self._async_keyword_search(page, keyword)
+
+            # 3. 区块定位
+            block_no = self.cfg.get('block_no', '')
+            if block_no:
+                await self._async_navigate_block(page, block_no)
+
+            # 4. 选择场次
+            schedule_idx = self.cfg.get('schedule_index', 0)
+            if self.cfg.get('day2', False):
+                schedule_idx = max(schedule_idx, 1)
+            await self._async_pick_schedule(page, schedule_idx)
+
+            if self.won:
+                return 'other_won'
+
+            # 5. 点击预约
+            if not await self._async_click_booking(page):
+                return 'booking_fail'
+
+            # 6. 处理弹窗
+            work_page = await self._async_handle_popup(page, ctx)
+            if work_page:
+                page = work_page
+                page.set_default_timeout(self.cfg.get('page_timeout', 10000))
+
+            if self.won:
+                return 'other_won'
+
+            # 7. 选择本档位
+            if not await self._async_pick_grade(page, grade_index, grade_name):
+                # 该档位售罄，标记
+                tt.mark_sold_out()
+                return 'grade_sold_out'
+
+            # 8. 选座
+            await self._async_pick_seat(page)
+
+            # 9. 锁票
+            if self.cfg.get('suo_tou', False):
+                await self._async_lock_ticket(page)
+
+            # 10. 验证码
+            await self._async_handle_captcha(page)
+
+            # 11. 支付渠道
+            ko_pay = self.cfg.get('ko_pay', '')
+            if ko_pay:
+                await self._async_select_payment(page, ko_pay)
+
+            # 12. 提交
+            await self._async_submit(page)
+
+            # 13. 检查结果
+            result = await self._async_check_result(page)
+
+            if result not in ('sold_out', 'unknown', 'other_won'):
+                await self._mark_win(grade_index, result)
+                self.log('info', f'🎉 [{grade_name}] 抢票成功！订单号: {result}')
+                await self._async_send_dingtalk(f'🎉 {grade_name} 抢票成功！订单号: {result}')
+
+                # 自动过户
+                if self.cfg.get('auto_guohu', False):
+                    await self._async_transfer(page)
+                return 'success'
+
+            # 失败处理
+            if result == 'sold_out':
+                tt.mark_sold_out()
+                await self._async_send_dingtalk(f'😢 {grade_name} 已售罄')
+
+            if self.cfg.get('auto_cancel', False):
+                await self._async_cancel(page)
+
+            return result
+
+        except Exception as e:
+            self.log('error', f'[{grade_name}] 异常: {e}')
+            try:
+                if self.cfg.get('auto_cancel', False):
+                    await self._async_cancel(page)
+            except Exception:
+                pass
+            return 'error'
+        finally:
+            try:
+                await page.close()
+            except Exception:
+                pass
+
+    # ──────────────── 辅助异步方法 ────────────────
+
+    async def _async_keyword_search(self, page, keyword: str) -> bool:
+        self.log('info', f'🔍 搜索关键词: {keyword}')
+        sels = ['#keyword', 'input[name="keyword"]', 'input[placeholder*="검색"]',
+                'input[placeholder*="搜索"]', '.search_input']
+        for sel in sels:
+            try:
+                await page.fill(sel, keyword, timeout=2000)
+                self.log('info', f'✅ 关键词已输入: {keyword}')
+                for btn_sel in ['#btnSearch', 'button:has-text("검색")', '.btn_search', 'button[type="submit"]']:
+                    try:
+                        await page.click(btn_sel, timeout=1000)
+                        break
+                    except Exception:
+                        continue
+                await asyncio.sleep(1)
+                return True
+            except Exception:
+                continue
+        return True
+
+    async def _async_navigate_block(self, page, block_no: str) -> bool:
+        self.log('info', f'🎯 定位区块: {block_no}')
+        sels = [
+            f'[data-block-no="{block_no}"]',
+            f'[data-block="{block_no}"]',
+            f'.block_item[data-id="{block_no}"]',
+            f'tr[data-block="{block_no}"]',
+        ]
+        for sel in sels:
+            try:
+                el = await page.query_selector(sel)
+                if el:
+                    await el.click()
+                    self.log('info', f'✅ 已选择区块 {block_no}')
+                    await asyncio.sleep(0.5)
+                    return True
+            except Exception:
+                continue
+        for sel in ['#blockNo', 'select[name="blockNo"]', '#blockList']:
+            try:
+                opts = await page.query_selector_all(f'{sel} option')
+                for opt in opts:
+                    val = await opt.get_attribute('value') or ''
+                    txt = await opt.inner_text() or ''
+                    if block_no in val or block_no in txt:
+                        await page.select_option(sel, val)
+                        self.log('info', f'✅ 下拉选择区块 {block_no}')
+                        return True
+            except Exception:
+                continue
+        self.log('info', f'区块 {block_no} 未找到，跳过')
+        return True
+
+    async def _async_lock_ticket(self, page) -> bool:
+        self.log('info', '🔒 执行锁票...')
+        sels = ['#btnLock', '.btn_lock', 'button:has-text("锁定")', 'button:has-text("잠금")']
+        for sel in sels:
+            try:
+                await page.click(sel, timeout=2000)
+                self.log('info', '✅ 锁票成功')
+                return True
+            except Exception:
+                continue
+        return True
+
+    async def _async_transfer(self, page) -> bool:
+        self.log('info', '🔄 执行自动过户...')
+        sels = ['#btnTransfer', '.btn_transfer', 'button:has-text("양도")',
+                'button:has-text("过户")', 'a:has-text("양도")']
+        for sel in sels:
+            try:
+                await page.click(sel, timeout=3000)
+                self.log('info', '✅ 过户按钮已点击')
+                await asyncio.sleep(2)
+                for cs in ['#btnConfirm', 'button:has-text("확인")', 'button:has-text("确认")']:
+                    try:
+                        await page.click(cs, timeout=2000)
+                        self.log('info', '✅ 过户确认完成')
+                        return True
+                    except Exception:
+                        continue
+                return True
+            except Exception:
+                continue
+        return True
+
+    async def _async_cancel(self, page) -> bool:
+        self.log('info', '❌ 执行自动取消...')
+        sels = ['#btnCancel', '.btn_cancel', 'button:has-text("취소")', 'button:has-text("取消")']
+        for sel in sels:
+            try:
+                await page.click(sel, timeout=2000)
+                self.log('info', '✅ 已取消')
+                return True
+            except Exception:
+                continue
+        return True
+
+    async def _async_select_payment(self, page, ko_pay: str) -> bool:
+        self.log('info', f'💳 选择支付渠道: {ko_pay}')
+        sels = ['#payMethod', 'select[name="payMethod"]', '#paymentType', 'select[name="payment"]']
+        for sel in sels:
+            try:
+                opts = await page.query_selector_all(f'{sel} option')
+                for opt in opts:
+                    text = await opt.inner_text() or ''
+                    value = await opt.get_attribute('value') or ''
+                    if ko_pay.lower() in text.lower() or ko_pay.lower() in value.lower():
+                        await page.select_option(sel, value)
+                        self.log('info', f'✅ 支付渠道: {text}')
+                        return True
+            except Exception:
+                continue
+        return True
+
+    # ──────────────── 主入口 ────────────────
 
     async def run_async(self, target_time: Optional[datetime] = None):
         """
-        异步执行抢票
-        1. 等待开售时间
-        2. 并发调度所有档位
-        3. 第一个成功的结果通知其他档位停止
+        异步主流程：
+        1. 启动浏览器 + 登录
+        2. 等待开售时间
+        3. 为每个可用档位创建独立 context
+        4. 所有档位并发执行抢票
+        5. 第一个成功 → 通知其余取消
         """
         self.log('info', '=' * 50)
         self.log('info', '🎫 AsyncGrabberEngine 启动')
         self.log('info', f'📄 {self.cfg.get("perf_url", "N/A")}')
         self.log('info', f'📊 {self.manager}')
+
+        if target_time:
+            kind = "会员预售" if self.cfg.get('presale_time') else "一般开售"
+            self.log('info', f'⏰ {kind}: {target_time}')
+        if self.cfg.get('lock_delay', 0) > 0:
+            self.log('info', f'⏳ 锁定延迟: {self.cfg["lock_delay"]}ms')
+        if self.cfg.get('keyword'):
+            self.log('info', f'🔍 关键词: {self.cfg["keyword"]}')
+        if self.cfg.get('auto_guohu'):
+            self.log('info', '🔄 自动过户已开启')
+        if self.cfg.get('yes_captcha_key'):
+            self.log('info', '🔐 验证码自动识别已开启')
+        if self.cfg.get('ding_webhook'):
+            self.log('info', '🔔 钉钉通知已开启')
         self.log('info', '=' * 50)
 
-        # 等待开售
-        if target_time:
-            now = datetime.now()
-            diff = (target_time - now).total_seconds()
-            if diff > 0:
-                self.log('info', f'⏱️ 距开售 {diff:.0f}s')
-                if diff > 10:
-                    await asyncio.sleep(diff - 5)
-                while datetime.now() < target_time:
-                    await asyncio.sleep(0.001)
-                self.log('info', '🎉 开售！！！')
+        await self._async_send_dingtalk('🚀 异步抢票引擎已启动...')
 
-        # 调度
-        self.schedule()
+        result = {'status': 'pending', 'order_id': self.order_id}
 
-        # 并发执行所有档位
-        tasks = [tt.register() for tt in self.manager.available_types() if tt._workers]
-        if not tasks:
-            self.log('error', '没有可用的抢票任务')
-            return {'status': 'no_tasks'}
+        try:
+            # 1. 启动浏览器
+            await self._start_browser()
 
-        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            # 2. 登录（登录态保存到 state 文件，所有 context 共享）
+            if not await self._async_login():
+                result['status'] = 'login_failed'
+                self._update_order(status='failed', result_detail='登录失败')
+                await self._async_send_dingtalk('❌ 登录失败，请检查账号密码')
+                return result
 
-        # 取消其他任务
-        for t in pending:
-            t.cancel()
+            # 3. 准备所有可用档位
+            available = self.manager.available_types()
+            if not available:
+                self.log('error', '没有可用档位')
+                result['status'] = 'no_grades'
+                self._update_order(status='failed', result_detail='没有可用档位')
+                return result
 
-        # 检查结果
-        for t in done:
+            self.log('info', f'📊 {len(available)} 个档位并发抢票: '
+                             f'{[tt.name for tt in available]}')
+
+            # 4. 为每个档位创建独立 context
+            contexts = []
+            for tt in available:
+                ctx = await self._new_context()
+                contexts.append((tt, ctx))
+
+            # 5. 等待开售
+            if target_time:
+                now = datetime.now()
+                diff = (target_time - now).total_seconds()
+                if diff > 0:
+                    self.log('info', f'⏱️ 距开售 {diff:.0f}s')
+                    # 粗等：到前 10 秒
+                    if diff > 15:
+                        await asyncio.sleep(diff - 10)
+                    # 精等：忙等待
+                    while datetime.now() < target_time:
+                        await asyncio.sleep(0.001)
+                    self.log('info', '🎉 开售！！！')
+
+            # 6. 并发执行所有档位
+            tasks = []
+            for tt, ctx in contexts:
+                task = asyncio.create_task(
+                    self._grab_grade(tt, ctx),
+                    name=f'grab-{tt.name}'
+                )
+                tasks.append(task)
+
+            self._update_order(total_tasks=len(tasks), threads_running=len(tasks))
+
+            # 等待任意一个成功，或全部失败
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+
+            # 7. 处理结果
+            success_found = False
+            for t in done:
+                try:
+                    status = t.result()
+                    self.log('info', f'[{t.get_name()}] 结果: {status}')
+                    if status == 'success':
+                        success_found = True
+                        result['status'] = 'success'
+                except Exception as e:
+                    self.log('error', f'[{t.get_name()}] 异常: {e}')
+
+            # 8. 取消仍在运行的任务
+            for t in pending:
+                t.cancel()
+                try:
+                    await t
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+            if not success_found:
+                result['status'] = 'failed'
+
+            # 9. 最终状态
+            if result['status'] == 'success':
+                self.log('info', '🎉🎉🎉 异步抢票成功！')
+                await self._async_send_dingtalk('🎉 抢票成功！')
+                self._update_order(threads_running=0, success_tasks=1)
+            else:
+                self.log('error', '所有档位均未成功')
+                await self._async_send_dingtalk('❌ 抢票失败，所有档位均未成功')
+                self._update_order(status='failed', result_detail='所有档位失败', threads_running=0)
+
+            return result
+
+        except Exception as e:
+            self.log('error', f'引擎异常: {e}')
+            result['status'] = 'error'
+            self._update_order(status='error', result_detail=str(e), threads_running=0)
+            await self._async_send_dingtalk(f'⚠️ 引擎异常: {str(e)[:100]}')
+            return result
+        finally:
+            # 清理
             try:
-                result = t.result()
-                if result == 'success':
-                    self._won = True
-                    self.log('info', '🎉🎉🎉 抢票成功！')
-                    self._update_order(status='success')
-                    return {'status': 'success'}
-            except Exception as e:
-                self.log('error', f'任务异常: {e}')
-
-        self.log('error', '所有档位均未成功')
-        self._update_order(status='failed')
-        return {'status': 'failed'}
+                if self.browser:
+                    await self.browser.close()
+                if self.pw:
+                    await self.pw.stop()
+            except Exception:
+                pass
 
     def run(self, target_time: Optional[datetime] = None):
-        """同步入口，启动 asyncio 事件循环"""
+        """同步入口"""
         loop = asyncio.new_event_loop()
         try:
             return loop.run_until_complete(self.run_async(target_time))
         finally:
             loop.close()
+
+    def get_logs(self) -> list:
+        return list(self._logs)

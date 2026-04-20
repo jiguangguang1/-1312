@@ -8,11 +8,15 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 class Config:
     """基础配置"""
-    SECRET_KEY = os.environ.get('SECRET_KEY', secrets.token_hex(32))
+    # ⚠️ SECRET_KEY / JWT_SECRET_KEY 必须通过 .env 设置固定值，否则重启后所有 token 失效
+    SECRET_KEY = os.environ.get('SECRET_KEY') or secrets.token_hex(32)
     SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL', f'sqlite:///{os.path.join(BASE_DIR, "wvs.db")}')
     SQLALCHEMY_TRACK_MODIFICATIONS = False
-    JWT_SECRET_KEY = os.environ.get('JWT_SECRET_KEY', secrets.token_hex(32))
+    JWT_SECRET_KEY = os.environ.get('JWT_SECRET_KEY') or secrets.token_hex(32)
     JWT_ACCESS_TOKEN_EXPIRES = 86400  # 24h
+
+    # 敏感字段加密密钥（用于 interpark_pw / card_cvv 等）
+    DATA_ENCRYPT_KEY = os.environ.get('DATA_ENCRYPT_KEY', '')
 
     # 抢票引擎默认配置
     GRABBER_HEADLESS = True
