@@ -1,0 +1,16 @@
+[
+    {
+        "access_token": "",
+        "refresh_token": "",
+        "device_id": "",
+        "label": "账号1",
+        "enabled": true
+    },
+    {
+        "access_token": "",
+        "refresh_token": "",
+        "device_id": "",
+        "label": "账号2",
+        "enabled": false
+    }
+]

@@ -1,0 +1,10 @@
+services:
+  grabber:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config.json:/app/config.json
+      - ./tokens.json:/app/tokens.json
+      - ./logs:/app/logs
+    restart: unless-stopped

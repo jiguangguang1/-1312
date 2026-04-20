@@ -1,0 +1,43 @@
+{
+    "goods_code": "26005547",
+    "place_code": "26000398",
+    "biz_code": "10965",
+
+    "sale_time": "2026-04-30 20:00:00",
+    "sale_tz": "Asia/Seoul",
+    "presale_time": "",
+
+    "play_dates": ["2026-06-12", "2026-06-13"],
+    "prefer_dates": [0, 1],
+    "prefer_grades": [0, 1, 2, 3],
+    "ticket_count": 1,
+
+    "max_retries": 500,
+    "retry_delay": 0.03,
+    "retry_backoff": true,
+    "pre_seconds": 2,
+
+    "auto_refresh_token": true,
+    "refresh_before_seconds": 120,
+
+    "proxy_rotation": false,
+    "proxy_list": [],
+    "proxy_api": "",
+
+    "web_port": 8080,
+    "web_host": "0.0.0.0",
+
+    "notifications": {
+        "ding_webhook": "",
+        "wx_webhook": "",
+        "telegram_bot_token": "",
+        "telegram_chat_id": ""
+    },
+
+    "anti_detect": {
+        "random_delay": true,
+        "delay_range": [0.01, 0.08],
+        "random_ua": true,
+        "human_like_clicks": true
+    }
+}
