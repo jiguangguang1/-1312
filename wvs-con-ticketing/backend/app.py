@@ -2,6 +2,7 @@
 
 import os
 import sys
+import json
 
 # 确保能导入同目录模块
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -11,7 +12,7 @@ from flask_cors import CORS
 from flask_jwt_extended import JWTManager, create_access_token, get_jwt_identity
 
 from config import config_map
-from models import db, User, Order, OrderLog, TicketClass
+from models import db, User, Order, OrderLog, TicketClass, Account
 from auth import login_required, admin_required
 from routes.orders import orders_bp
 from routes.admin import admin_bp
@@ -192,6 +193,214 @@ def create_app(config_name=None):
         db.session.delete(tc)
         db.session.commit()
         return jsonify({'message': '已删除'})
+
+    # ---- 多账号管理 API ----
+
+    @app.route('/api/accounts', methods=['GET'])
+    @login_required
+    def list_accounts():
+        """获取用户的账号列表"""
+        user_id = int(get_jwt_identity())
+        order_id = request.args.get('order_id', type=int)
+        q = Account.query.filter_by(user_id=user_id)
+        if order_id:
+            q = q.filter_by(order_id=order_id)
+        accounts = q.order_by(Account.no).all()
+        return jsonify({'accounts': [a.to_dict() for a in accounts]})
+
+    @app.route('/api/accounts', methods=['POST'])
+    @login_required
+    def create_account():
+        """添加账号"""
+        user_id = int(get_jwt_identity())
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': '请求体为空'}), 400
+
+        email = data.get('email', '').strip()
+        password = data.get('password', '')
+        if not email or not password:
+            return jsonify({'error': '请填写邮箱和密码'}), 400
+
+        # 自动计算序号
+        order_id = data.get('order_id')
+        max_no = db.session.query(db.func.max(Account.no)).filter_by(user_id=user_id).scalar() or 0
+
+        account = Account(
+            user_id=user_id,
+            order_id=order_id,
+            no=max_no + 1,
+            email=email,
+            password=password,
+            proxy=data.get('proxy', ''),
+            card_no=data.get('card_no', ''),
+            card_cvv=data.get('card_cvv', ''),
+            wrid=data.get('wrid', ''),
+        )
+        db.session.add(account)
+        db.session.commit()
+        return jsonify({'message': '账号已添加', 'account': account.to_dict()}), 201
+
+    @app.route('/api/accounts/<int:acc_id>', methods=['PUT'])
+    @login_required
+    def update_account(acc_id):
+        """更新账号"""
+        user_id = int(get_jwt_identity())
+        acc = Account.query.filter_by(id=acc_id, user_id=user_id).first()
+        if not acc:
+            return jsonify({'error': '账号不存在'}), 404
+
+        data = request.get_json()
+        updatable = ['email', 'password', 'proxy', 'card_no', 'card_cvv', 'wrid', 'status', 'order_id']
+        for key in updatable:
+            if key in data and data[key] is not None:
+                setattr(acc, key, data[key])
+
+        db.session.commit()
+        return jsonify({'message': '更新成功', 'account': acc.to_dict()})
+
+    @app.route('/api/accounts/<int:acc_id>', methods=['DELETE'])
+    @login_required
+    def delete_account(acc_id):
+        """删除账号"""
+        user_id = int(get_jwt_identity())
+        acc = Account.query.filter_by(id=acc_id, user_id=user_id).first()
+        if not acc:
+            return jsonify({'error': '账号不存在'}), 404
+        db.session.delete(acc)
+        db.session.commit()
+        return jsonify({'message': '已删除'})
+
+    @app.route('/api/accounts/batch', methods=['POST'])
+    @login_required
+    def batch_create_accounts():
+        """批量导入账号 (JSON 数组)"""
+        user_id = int(get_jwt_identity())
+        data = request.get_json()
+        if not isinstance(data, list):
+            return jsonify({'error': '需要账号数组'}), 400
+
+        max_no = db.session.query(db.func.max(Account.no)).filter_by(user_id=user_id).scalar() or 0
+        created = 0
+        for item in data:
+            if not item.get('email') or not item.get('password'):
+                continue
+            max_no += 1
+            acc = Account(
+                user_id=user_id,
+                order_id=item.get('order_id'),
+                no=max_no,
+                email=item['email'],
+                password=item['password'],
+                proxy=item.get('proxy', ''),
+                card_no=item.get('card_no', ''),
+                card_cvv=item.get('card_cvv', ''),
+                wrid=item.get('wrid', ''),
+            )
+            db.session.add(acc)
+            created += 1
+
+        db.session.commit()
+        return jsonify({'message': f'导入 {created} 个账号'}), 201
+
+    # ---- GetBlock API ----
+
+    @app.route('/api/orders/<int:order_id>/get-block', methods=['POST'])
+    @login_required
+    def get_block_no(order_id):
+        """获取票务区块编号"""
+        user_id = int(get_jwt_identity())
+        order = Order.query.filter_by(id=order_id, user_id=user_id).first()
+        if not order:
+            return jsonify({'error': '订单不存在'}), 404
+
+        data = request.get_json() or {}
+        goods_code = data.get('goods_code', order.goods_code)
+        place_code = data.get('place_code', order.place_code)
+        seat_mode = data.get('seat_mode', order.seat_mode)
+
+        if not goods_code:
+            return jsonify({'error': '请填写商品编码'}), 400
+
+        # 更新订单
+        order.goods_code = goods_code
+        order.place_code = place_code
+        order.seat_mode = seat_mode
+        db.session.commit()
+
+        # 模拟获取 blockNo（实际需对接 Interpark API）
+        import hashlib
+        block_hash = hashlib.md5(f"{goods_code}:{place_code}:{seat_mode}".encode()).hexdigest()[:8]
+        order.block_no = block_hash
+        db.session.commit()
+
+        return jsonify({
+            'message': '区块编号已获取',
+            'block_no': block_hash,
+            'goods_code': goods_code,
+            'place_code': place_code,
+            'seat_mode': seat_mode,
+        })
+
+    # ---- 钉钉通知 API ----
+
+    @app.route('/api/orders/<int:order_id>/ding/init', methods=['POST'])
+    @login_required
+    def ding_init(order_id):
+        """初始化钉钉通知"""
+        user_id = int(get_jwt_identity())
+        order = Order.query.filter_by(id=order_id, user_id=user_id).first()
+        if not order:
+            return jsonify({'error': '订单不存在'}), 404
+
+        data = request.get_json() or {}
+        webhook = data.get('webhook', '').strip()
+        if not webhook:
+            return jsonify({'error': '请填写钉钉 Webhook 地址'}), 400
+
+        order.ding_webhook = webhook
+        db.session.commit()
+
+        # 发送测试消息
+        try:
+            import urllib.request
+            import urllib.parse
+            msg_data = json.dumps({
+                'msgtype': 'text',
+                'text': {'content': f'🎫 YAOLO 抢票系统已连接\n订单 #{order.id} 钉钉通知已启用'}
+            }).encode('utf-8')
+            req = urllib.request.Request(webhook, data=msg_data, headers={'Content-Type': 'application/json'})
+            urllib.request.urlopen(req, timeout=5)
+            return jsonify({'message': '钉钉通知已初始化', 'webhook': webhook})
+        except Exception as e:
+            return jsonify({'message': f'Webhook 已保存，但测试发送失败: {e}', 'webhook': webhook})
+
+    @app.route('/api/orders/<int:order_id>/ding/push', methods=['POST'])
+    @login_required
+    def ding_push(order_id):
+        """推送钉钉通知"""
+        user_id = int(get_jwt_identity())
+        order = Order.query.filter_by(id=order_id, user_id=user_id).first()
+        if not order:
+            return jsonify({'error': '订单不存在'}), 404
+
+        if not order.ding_webhook:
+            return jsonify({'error': '未配置钉钉 Webhook'}), 400
+
+        data = request.get_json() or {}
+        message = data.get('message', f'订单 #{order.id} 状态: {order.status}')
+
+        try:
+            import urllib.request
+            msg_data = json.dumps({
+                'msgtype': 'text',
+                'text': {'content': f'🎫 {message}'}
+            }).encode('utf-8')
+            req = urllib.request.Request(order.ding_webhook, data=msg_data, headers={'Content-Type': 'application/json'})
+            urllib.request.urlopen(req, timeout=5)
+            return jsonify({'message': '通知已推送'})
+        except Exception as e:
+            return jsonify({'error': f'推送失败: {e}'}), 500
 
     # ---- 静态文件 ----
 

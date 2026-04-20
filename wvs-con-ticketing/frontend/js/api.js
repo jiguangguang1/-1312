@@ -190,6 +190,62 @@ const API = {
       body: JSON.stringify(data),
     });
   },
+
+  // Accounts (多账号)
+  getAccounts(params = {}) {
+    const qs = new URLSearchParams(params).toString();
+    return this.request(`/api/accounts?${qs}`);
+  },
+
+  createAccount(data) {
+    return this.request('/api/accounts', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  },
+
+  updateAccount(id, data) {
+    return this.request(`/api/accounts/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    });
+  },
+
+  deleteAccount(id) {
+    return this.request(`/api/accounts/${id}`, {
+      method: 'DELETE',
+    });
+  },
+
+  batchCreateAccounts(data) {
+    return this.request('/api/accounts/batch', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  },
+
+  // GetBlock
+  getBlockNo(orderId, data) {
+    return this.request(`/api/orders/${orderId}/get-block`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  },
+
+  // 钉钉
+  dingInit(orderId, webhook) {
+    return this.request(`/api/orders/${orderId}/ding/init`, {
+      method: 'POST',
+      body: JSON.stringify({ webhook }),
+    });
+  },
+
+  dingPush(orderId, message) {
+    return this.request(`/api/orders/${orderId}/ding/push`, {
+      method: 'POST',
+      body: JSON.stringify({ message }),
+    });
+  },
 };
 
 // Toast 通知

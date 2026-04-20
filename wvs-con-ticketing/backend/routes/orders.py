@@ -6,7 +6,7 @@ from flask import Blueprint, request, jsonify, current_app
 from flask_jwt_extended import get_jwt_identity
 
 from auth import login_required
-from models import db, Order, OrderLog, User, TicketClass
+from models import db, Order, OrderLog, User, TicketClass, Account
 
 orders_bp = Blueprint('orders', __name__, url_prefix='/api/orders')
 
@@ -73,6 +73,25 @@ def create_order():
         tab_count=data.get('tab_count', 4),
         proxy=data.get('proxy', ''),
         status='pending',
+        # 新增字段
+        goods_code=data.get('goods_code', ''),
+        place_code=data.get('place_code', ''),
+        seat_mode=data.get('seat_mode', 1),
+        lock_delay=data.get('lock_delay', 1200),
+        delay_start=data.get('delay_start', 300),
+        kr_ticket_mode=data.get('kr_ticket_mode', ''),
+        auto_guohu=bool(data.get('auto_guohu', False)),
+        auto_cancel=bool(data.get('auto_cancel', False)),
+        guohu_pay=bool(data.get('guohu_pay', False)),
+        yes_captcha_key=data.get('yes_captcha_key', ''),
+        proxy_api=data.get('proxy_api', ''),
+        ding_webhook=data.get('ding_webhook', ''),
+        thread_count=data.get('thread_count', 1),
+        keyword=data.get('keyword', ''),
+        suo_tou=bool(data.get('suo_tou', False)),
+        day2=bool(data.get('day2', False)),
+        pre_yn=data.get('pre_yn', 'N'),
+        ko_pay=data.get('ko_pay', ''),
     )
 
     db.session.add(order)
@@ -116,7 +135,11 @@ def update_order(order_id):
 
     data = request.get_json()
     updatable = ['perf_url', 'schedule_index', 'schedule_label', 'seat_prefs',
-                 'open_time', 'presale_time', 'tab_count', 'proxy']
+                 'open_time', 'presale_time', 'tab_count', 'proxy',
+                 'goods_code', 'place_code', 'seat_mode', 'lock_delay', 'delay_start',
+                 'kr_ticket_mode', 'auto_guohu', 'auto_cancel', 'guohu_pay',
+                 'yes_captcha_key', 'proxy_api', 'ding_webhook', 'thread_count',
+                 'keyword', 'suo_tou', 'day2', 'pre_yn', 'ko_pay']
 
     for key in updatable:
         if key in data:
