@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>🔧 管理后台 · YAOLO</title>
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔧</text></svg>">
+</head>
+<body>
+  <nav class="navbar">
+    <div class="navbar-inner">
+      <a href="/" class="navbar-brand">
+        <span class="emoji">🎫</span>
+        <span>YAOLO</span>
+      </a>
+      <div class="navbar-links">
+        <a href="/" class="navbar-link">首页</a>
+        <a href="/dashboard" class="navbar-link">控制台</a>
+        <a href="/admin" class="navbar-link active">管理</a>
+      </div>
+      <div id="navAuth"></div>
+    </div>
+  </nav>
+
+  <div class="toast-container" id="toastContainer"></div>
+
+  <main class="container dashboard">
+    <h1 style="font-size:1.5rem; font-weight:800; margin-bottom:24px;">🔧 管理后台</h1>
+
+    <!-- 统计 -->
+    <div class="admin-grid" id="adminStats">
+      <div class="admin-stat">
+        <div class="admin-stat-value" id="adminTotalUsers">-</div>
+        <div class="admin-stat-label">用户总数</div>
+      </div>
+      <div class="admin-stat">
+        <div class="admin-stat-value" id="adminTotalOrders">-</div>
+        <div class="admin-stat-label">订单总数</div>
+      </div>
+      <div class="admin-stat">
+        <div class="admin-stat-value" id="adminGrabbing" style="color:var(--info);">-</div>
+        <div class="admin-stat-label">抢票中</div>
+      </div>
+      <div class="admin-stat">
+        <div class="admin-stat-value" id="adminSuccess" style="color:var(--success);">-</div>
+        <div class="admin-stat-label">成功</div>
+      </div>
+      <div class="admin-stat">
+        <div class="admin-stat-value" id="adminFailed" style="color:var(--error);">-</div>
+        <div class="admin-stat-label">失败</div>
+      </div>
+      <div class="admin-stat">
+        <div class="admin-stat-value" id="adminSoldOut" style="color:var(--warning);">-</div>
+        <div class="admin-stat-label">售罄</div>
+      </div>
+    </div>
+
+    <!-- Tab -->
+    <div class="tabs">
+      <button class="tab active" onclick="switchAdminTab('orders', this)">📋 所有订单</button>
+      <button class="tab" onclick="switchAdminTab('users', this)">👥 用户列表</button>
+      <button class="tab" onclick="switchAdminTab('seats', this)">💺 座位配置</button>
+    </div>
+
+    <!-- 订单列表 -->
+    <div id="adminOrdersTab" class="tab-content active">
+      <div style="display:flex; gap:8px; margin-bottom:16px; flex-wrap:wrap;">
+        <button class="btn btn-sm btn-secondary" onclick="loadAdminOrders()">🔄 刷新</button>
+        <select class="form-select" style="width:auto;padding:6px 32px 6px 12px;font-size:0.85rem;" id="orderStatusFilter" onchange="loadAdminOrders()">
+          <option value="">全部状态</option>
+          <option value="pending">待启动</option>
+          <option value="waiting">等待中</option>
+          <option value="grabbing">抢票中</option>
+          <option value="success">成功</option>
+          <option value="failed">失败</option>
+          <option value="sold_out">售罄</option>
+          <option value="error">异常</option>
+        </select>
+      </div>
+      <div id="adminOrdersList">加载中...</div>
+    </div>
+
+    <!-- 用户列表 -->
+    <div id="adminUsersTab" class="tab-content">
+      <div style="margin-bottom:16px;">
+        <button class="btn btn-sm btn-secondary" onclick="loadAdminUsers()">🔄 刷新</button>
+      </div>
+      <div id="adminUsersList">加载中...</div>
+    </div>
+
+    <!-- 座位配置 -->
+    <div id="adminSeatsTab" class="tab-content">
+      <div style="display:flex; gap:8px; margin-bottom:16px; flex-wrap:wrap;">
+        <button class="btn btn-sm btn-secondary" onclick="loadAdminTicketClasses()">🔄 刷新</button>
+        <button class="btn btn-sm btn-primary" onclick="showAddTicketClassForm()">➕ 添加档位</button>
+      </div>
+      <div id="adminSeatsList">加载中...</div>
+    </div>
+  </main>
+
+  <script src="js/api.js"></script>
+  <script src="js/auth.js"></script>
+  <script src="js/admin.js"></script>
+</body>
+</html>

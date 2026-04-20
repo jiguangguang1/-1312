@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>🎫 YAOLO · Weverse Con 2026 抢票系统</title>
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎫</text></svg>">
+</head>
+<body>
+  <!-- 导航栏 -->
+  <nav class="navbar">
+    <div class="navbar-inner">
+      <a href="/" class="navbar-brand">
+        <span class="emoji">🎫</span>
+        <span>YAOLO</span>
+      </a>
+      <div class="navbar-links" id="navLinks">
+        <a href="/" class="navbar-link active">首页</a>
+        <a href="/dashboard" class="navbar-link">控制台</a>
+        <a href="/admin" class="navbar-link" id="adminLink" style="display:none">管理</a>
+      </div>
+      <div id="navAuth">
+        <a href="#" class="btn btn-primary btn-sm" onclick="showLoginModal()">登录</a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Toast 容器 -->
+  <div class="toast-container" id="toastContainer"></div>
+
+  <!-- Hero -->
+  <section class="hero">
+    <div class="container">
+      <h1 class="hero-title animate-in">
+        <span class="highlight">YAOLO</span> Weverse Con 2026<br>
+        <span style="font-size:1.5rem; font-weight:600;">🎫 全球首次开售 · 全平台通用 · 免费体验 🎫</span>
+      </h1>
+      <p class="hero-subtitle animate-in animate-delay-1">
+        由 Kivisense 提供的智能抢票系统，多窗口并发、精确倒计时、声音提醒，助你第一时间锁定心仪的座位。
+      </p>
+
+      <!-- 订阅按钮 -->
+      <div class="text-center animate-in animate-delay-2" style="margin-bottom: 16px;">
+        <a href="#" class="btn btn-secondary" onclick="showLoginModal()" style="min-width: 200px;">
+          ✉️ 开售提醒
+        </a>
+      </div>
+
+      <!-- 平台下载 -->
+      <div class="download-buttons animate-in animate-delay-3">
+        <a href="#" class="download-btn">
+          <span class="icon">🤖</span>
+          <div>
+            <div style="font-size:0.75rem; color:var(--text-dim);">Get it on</div>
+            <div>Android</div>
+          </div>
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <!-- 服务说明 -->
+  <section class="container">
+    <div class="info-grid" style="margin-bottom:40px;">
+      <div class="info-card animate-in">
+        <h3>📋 YAOLO 服务介绍</h3>
+        <p>
+          YAOLO 全称为 You Are Our Little One，致力于为全球粉丝提供最可靠的演唱会门票代拍服务。
+          系统基于 Playwright 自动化引擎，支持多窗口真并发抢票。
+        </p>
+      </div>
+      <div class="info-card animate-in animate-delay-1">
+        <h3>🔒 数据安全</h3>
+        <ul>
+          <li>Interpark 登录凭证仅用于抢票，不存储明文密码</li>
+          <li>所有通信加密传输</li>
+          <li>抢票完成后自动清理浏览器状态</li>
+          <li>严格遵循平台服务条款</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- 四大服务 -->
+  <section class="container">
+    <h2 style="text-align:center; font-size:1.5rem; font-weight:800; margin-bottom:32px;">🎫 四大核心服务</h2>
+    <div class="features">
+      <div class="feature-card animate-in" onclick="handleFeatureClick('presale')">
+        <div class="feature-icon presale">🔥</div>
+        <h3 class="feature-title">会员预售代拍</h3>
+        <p class="feature-desc">Weverse 会员专享：提前抢票，优先选座，VIP 站席 / SR 级别最优位。</p>
+      </div>
+      <div class="feature-card animate-in animate-delay-1" onclick="handleFeatureClick('general')">
+        <div class="feature-icon ticket">🎫</div>
+        <h3 class="feature-title">演唱会门票代拍</h3>
+        <p class="feature-desc">公开售票首秒并发冲刺，4~6 个标签页同时运作，最大化抢票成功率。</p>
+      </div>
+      <div class="feature-card animate-in animate-delay-2" onclick="handleFeatureClick('upgrade')">
+        <div class="feature-icon upgrade">⬆️</div>
+        <h3 class="feature-title">升舱券</h3>
+        <p class="feature-desc">已持有低等级门票？通过系统自动检测高等级余票，实现座位升级。</p>
+      </div>
+      <div class="feature-card animate-in animate-delay-3" onclick="handleFeatureClick('monitor')">
+        <div class="feature-icon" style="background:linear-gradient(135deg,rgba(16,185,129,.2),rgba(16,185,129,.05))">📊</div>
+        <h3 class="feature-title">实时监控</h3>
+        <p class="feature-desc">Web 界面实时查看抢票进度、日志、截图，随时掌握状态。</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 使用流程 -->
+  <section class="container steps">
+    <h2 class="steps-title">📌 使用流程</h2>
+    <div class="steps-grid">
+      <div class="step animate-in">
+        <div class="step-number">1</div>
+        <h4 class="step-title">注册 / 登录</h4>
+        <p class="step-desc">创建账号并填写 Interpark 凭证</p>
+      </div>
+      <div class="step animate-in animate-delay-1">
+        <div class="step-number">2</div>
+        <h4 class="step-title">提交订单</h4>
+        <p class="step-desc">选择场次、座位、开售时间</p>
+      </div>
+      <div class="step animate-in animate-delay-2">
+        <div class="step-number">3</div>
+        <h4 class="step-title">自动抢票</h4>
+        <p class="step-desc">系统在开售瞬间多窗口并发</p>
+      </div>
+      <div class="step animate-in animate-delay-3">
+        <div class="step-number">4</div>
+        <h4 class="step-title">收到结果</h4>
+        <p class="step-desc">成功即时通知，附订单截图</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 特别合作 -->
+  <section class="container" style="padding:40px 0;">
+    <div class="info-grid">
+      <div class="info-card animate-in">
+        <h3>🎵 特别合作</h3>
+        <p><strong>Weverse Con 2026</strong> by HYBE — 全球粉丝盛会，顶级 K-pop 艺人阵容。YAOLO 为 Interpark 购票提供全自动化支持。</p>
+        <p style="margin-top:12px;">⭐ 特别合作 All Access by Weverse Con 2026</p>
+      </div>
+      <div class="info-card animate-in animate-delay-1">
+        <h3>📱 Interpark 抢票指南</h3>
+        <ul>
+          <li>访问 tickets.interpark.com 并登录</li>
+          <li>搜索 "Weverse Con 2026" 演出</li>
+          <li>选择日期和座位等级</li>
+          <li>确保付款方式就绪</li>
+          <li>开售时间准时操作</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- 服务条款 -->
+  <section class="container">
+    <div class="terms">
+      <h3 class="terms-title">📋 服务条款摘要</h3>
+      <ul class="terms-list">
+        <li>一旦成功抢票不可取消、不可退款</li>
+        <li>代拍服务费在抢票成功后收取</li>
+        <li>我们保证合法合规的代拍服务</li>
+        <li>100% 真实人手手动抢票</li>
+        <li>禁止使用任何非法外挂程序</li>
+        <li>如未成功抢票，全额退还代拍费用</li>
+        <li>请仔细阅读完整服务条款</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- CTA -->
+  <section class="container text-center" style="padding: 40px 0 60px;">
+    <h2 style="font-size:1.8rem; font-weight:800; margin-bottom:16px;">
+      准备好抢票了吗？🎫
+    </h2>
+    <p style="color:var(--text-dim); margin-bottom:24px;">
+      立即注册，设置你的第一张抢票订单
+    </p>
+    <a href="#" class="btn btn-primary btn-lg" onclick="handleGetStarted()">
+      🚀 立即开始
+    </a>
+  </section>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <div class="container">
+      <p>© 2026 YAOLO · Powered by Kivisense</p>
+      <div class="footer-links">
+        <a href="#">隐私政策</a>
+        <a href="#">服务条款</a>
+        <a href="#">联系我们</a>
+      </div>
+    </div>
+  </footer>
+
+  <!-- 登录模态框 -->
+  <div class="modal-overlay" id="loginModal">
+    <div class="modal">
+      <div class="modal-header">
+        <h2 class="modal-title" id="authModalTitle">登录</h2>
+        <button class="modal-close" onclick="closeModal('loginModal')">&times;</button>
+      </div>
+      <form id="authForm" onsubmit="handleAuth(event)">
+        <div class="form-group" id="emailGroup" style="display:none">
+          <label class="form-label">邮箱</label>
+          <input type="email" class="form-input" id="authEmail" placeholder="your@email.com">
+        </div>
+        <div class="form-group">
+          <label class="form-label">用户名</label>
+          <input type="text" class="form-input" id="authUsername" placeholder="用户名" required>
+        </div>
+        <div class="form-group">
+          <label class="form-label">密码</label>
+          <input type="password" class="form-input" id="authPassword" placeholder="至少6位" required>
+        </div>
+        <button type="submit" class="btn btn-primary btn-block" id="authSubmitBtn">登录</button>
+        <p style="text-align:center; margin-top:16px; font-size:0.9rem;">
+          <a href="#" id="toggleAuthMode" onclick="toggleAuthMode()">没有账号？注册</a>
+        </p>
+      </form>
+    </div>
+  </div>
+
+  <script src="js/api.js"></script>
+  <script src="js/auth.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
