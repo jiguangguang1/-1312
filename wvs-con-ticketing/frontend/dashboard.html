@@ -184,21 +184,21 @@
           </div>
           <div class="form-row">
             <div class="form-group">
-              <label class="form-label">GoodsCode</label>
+              <label class="form-label">商品编码 (GoodsCode)</label>
               <input type="text" class="form-input" id="orderGoodsCode" placeholder="商品编码，如 26002502">
             </div>
             <div class="form-group">
-              <label class="form-label">PlaceCode</label>
+              <label class="form-label">场地编码 (PlaceCode)</label>
               <input type="text" class="form-input" id="orderPlaceCode" placeholder="场地编码">
             </div>
           </div>
           <div class="form-row">
             <div class="form-group">
-              <label class="form-label">seat mode</label>
+              <label class="form-label">座位模式</label>
               <input type="number" class="form-input" id="orderSeatMode" value="1" min="0">
             </div>
             <div class="form-group" style="display:flex; align-items:flex-end;">
-              <button type="button" class="btn btn-primary btn-block" onclick="handleGetBlock()">get blockNo</button>
+              <button type="button" class="btn btn-primary btn-block" onclick="handleGetBlock()">获取区块编号</button>
             </div>
           </div>
           <div id="blockNoResult" style="display:none; margin-top:8px; padding:10px; border-radius:8px; background:rgba(16,185,129,0.1); color:var(--success); font-size:0.85rem;"></div>
@@ -211,50 +211,50 @@
           </div>
           <div class="form-row">
             <div class="form-group">
-              <label class="form-label">Lock Delay (ms)</label>
+              <label class="form-label">锁定延迟 (毫秒)</label>
               <input type="number" class="form-input" id="orderLockDelay" value="1200" min="0">
               <span class="form-hint">票务锁定延迟时间</span>
             </div>
             <div class="form-group">
-              <label class="form-label">delay start (ms)</label>
+              <label class="form-label">启动延迟 (毫秒)</label>
               <input type="number" class="form-input" id="orderDelayStart" value="300" min="0">
               <span class="form-hint">任务延迟启动时间</span>
             </div>
           </div>
           <div class="form-row">
             <div class="form-group">
-              <label class="form-label">kr ticket mode</label>
+              <label class="form-label">票务模式编码</label>
               <input type="text" class="form-input" id="orderKrTicketMode" placeholder="如 24001">
               <span class="form-hint">韩国 Interpark 票务模式编码</span>
             </div>
             <div class="form-group">
-              <label class="form-label">keyword (关键词)</label>
+              <label class="form-label">搜索关键词</label>
               <input type="text" class="form-input" id="orderKeyword" placeholder="搜索关键词">
               <span class="form-hint">按关键词定位目标票务</span>
             </div>
           </div>
           <div class="form-row">
             <div class="form-group">
-              <label class="form-label">Pre Y/N</label>
+              <label class="form-label">预抢票开关</label>
               <select class="form-select" id="orderPreYN">
-                <option value="N">N — 否</option>
-                <option value="Y">Y — 是</option>
+                <option value="N">否</option>
+                <option value="Y">是</option>
               </select>
             </div>
             <div class="form-group">
-              <label class="form-label">ko pay (韩国支付渠道)</label>
+              <label class="form-label">韩国支付渠道</label>
               <input type="text" class="form-input" id="orderKoPay" placeholder="支付渠道名称">
             </div>
           </div>
           <div style="display:flex; gap:20px; flex-wrap:wrap; margin-top:4px;">
             <label style="display:flex; align-items:center; gap:6px; font-size:0.85rem; color:var(--text-dim); cursor:pointer;">
-              <input type="checkbox" id="orderSuoTou" style="accent-color:var(--primary); width:16px; height:16px;"> SuoTou (锁票)
+              <input type="checkbox" id="orderSuoTou" style="accent-color:var(--primary); width:16px; height:16px;"> 锁票模式
             </label>
             <label style="display:flex; align-items:center; gap:6px; font-size:0.85rem; color:var(--text-dim); cursor:pointer;">
-              <input type="checkbox" id="orderDay2" style="accent-color:var(--primary); width:16px; height:16px;"> day2 (次日票务)
+              <input type="checkbox" id="orderDay2" style="accent-color:var(--primary); width:16px; height:16px;"> 次日票务
             </label>
             <label style="display:flex; align-items:center; gap:6px; font-size:0.85rem; color:var(--text-dim); cursor:pointer;">
-              <input type="checkbox" id="orderLog" checked style="accent-color:var(--primary); width:16px; height:16px;"> Log (日志记录)
+              <input type="checkbox" id="orderLog" checked style="accent-color:var(--primary); width:16px; height:16px;"> 开启日志
             </label>
           </div>
         </div>
@@ -266,13 +266,13 @@
           </div>
           <div style="display:flex; gap:20px; flex-wrap:wrap;">
             <label style="display:flex; align-items:center; gap:6px; font-size:0.85rem; color:var(--text-dim); cursor:pointer;">
-              <input type="checkbox" id="orderAutoGuoHu" style="accent-color:var(--primary); width:16px; height:16px;"> AutoGuoHu (自动过户)
+              <input type="checkbox" id="orderAutoGuoHu" style="accent-color:var(--primary); width:16px; height:16px;"> 自动过户
             </label>
             <label style="display:flex; align-items:center; gap:6px; font-size:0.85rem; color:var(--text-dim); cursor:pointer;">
-              <input type="checkbox" id="orderAutoCancel" style="accent-color:var(--primary); width:16px; height:16px;"> AutoCancel (异常自动取消)
+              <input type="checkbox" id="orderAutoCancel" style="accent-color:var(--primary); width:16px; height:16px;"> 异常自动取消
             </label>
             <label style="display:flex; align-items:center; gap:6px; font-size:0.85rem; color:var(--text-dim); cursor:pointer;">
-              <input type="checkbox" id="orderGuoHuPay" style="accent-color:var(--primary); width:16px; height:16px;"> guohuPay (过户支付)
+              <input type="checkbox" id="orderGuoHuPay" style="accent-color:var(--primary); width:16px; height:16px;"> 过户支付
             </label>
           </div>
         </div>
@@ -284,22 +284,22 @@
           </div>
           <div class="form-row">
             <div class="form-group">
-              <label class="form-label">Proxy-API</label>
+              <label class="form-label">代理轮换 API</label>
               <input type="text" class="form-input" id="orderProxyApi" placeholder="代理轮换 API 地址">
               <span class="form-hint">通过 API 切换 IP 规避风控</span>
             </div>
             <div class="form-group">
-              <label class="form-label">YesCaptcha-Key</label>
+              <label class="form-label">验证码识别密钥</label>
               <input type="text" class="form-input" id="orderYesCaptchaKey" placeholder="验证码识别平台 Key">
               <span class="form-hint">自动识别验证码</span>
             </div>
           </div>
           <div class="form-group">
-            <label class="form-label">Ding (钉钉 Webhook)</label>
+            <label class="form-label">钉钉通知 (Webhook)</label>
             <div style="display:flex; gap:8px;">
               <input type="text" class="form-input" id="orderDingWebhook" placeholder="https://oapi.dingtalk.com/robot/send?access_token=..." style="flex:1;">
-              <button type="button" class="btn btn-sm btn-secondary" onclick="handleDingInit()">init</button>
-              <button type="button" class="btn btn-sm btn-secondary" onclick="handleDingPush()">push</button>
+              <button type="button" class="btn btn-sm btn-secondary" onclick="handleDingInit()">初始化</button>
+              <button type="button" class="btn btn-sm btn-secondary" onclick="handleDingPush()">发送测试</button>
             </div>
           </div>
         </div>
@@ -311,15 +311,15 @@
           </div>
           <div class="form-row">
             <div class="form-group">
-              <label class="form-label">thread (线程数)</label>
+              <label class="form-label">线程数</label>
               <input type="number" class="form-input" id="orderThreadCount" value="1" min="1" max="20">
             </div>
             <div class="form-group" style="display:flex; align-items:flex-end; gap:12px;">
               <div class="mini-stats">
-                <div class="mini-stat"><span class="mini-stat-value" id="miniTotalTask">0</span><span class="mini-stat-label">Total Task</span></div>
-                <div class="mini-stat"><span class="mini-stat-value" id="miniSuccessTask" style="color:var(--success);">0</span><span class="mini-stat-label">Success</span></div>
-                <div class="mini-stat"><span class="mini-stat-value" id="miniThreadsNum">0</span><span class="mini-stat-label">Threads</span></div>
-                <div class="mini-stat"><span class="mini-stat-value" id="miniSYL" style="color:var(--warning);">0</span><span class="mini-stat-label">SYL</span></div>
+                <div class="mini-stat"><span class="mini-stat-value" id="miniTotalTask">0</span><span class="mini-stat-label">总任务</span></div>
+                <div class="mini-stat"><span class="mini-stat-value" id="miniSuccessTask" style="color:var(--success);">0</span><span class="mini-stat-label">成功</span></div>
+                <div class="mini-stat"><span class="mini-stat-value" id="miniThreadsNum">0</span><span class="mini-stat-label">线程</span></div>
+                <div class="mini-stat"><span class="mini-stat-value" id="miniSYL" style="color:var(--warning);">0</span><span class="mini-stat-label">剩余</span></div>
               </div>
             </div>
           </div>
@@ -353,7 +353,7 @@
         <div class="form-group">
           <label class="form-label">💺 座位区域预览</label>
           <div class="seat-map" id="seatMap">
-            <div class="seat-map-stage">🎤 STAGE</div>
+            <div class="seat-map-stage">🎤 舞台 STAGE</div>
             <div class="seat-map-grid">
               <div class="seat-zone zone-vip" data-grade="0" onclick="toggleZoneSeat(0)">
                 <span class="zone-icon">🔥</span>
