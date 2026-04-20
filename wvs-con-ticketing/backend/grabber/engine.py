@@ -74,33 +74,45 @@ class GrabberEngine:
         self._status = 'init'
         self._logs = []
 
+    def _get_db(self):
+        """获取数据库 session — 支持 Flask 应用上下文"""
+        if self.db:
+            return self.db
+        try:
+            from models import db
+            return db.session
+        except Exception:
+            return None
+
     def log(self, level: str, msg: str):
         entry = {'time': datetime.now().isoformat(), 'level': level, 'message': msg}
         self._logs.append(entry)
         getattr(logger, level if level in ('debug', 'info', 'warning', 'error') else 'info', logger.info)(
             f"[Order#{self.order_id}] {msg}"
         )
-        if self.db:
+        session = self._get_db()
+        if session:
             try:
                 from models import OrderLog
-                self.db.add(OrderLog(order_id=self.order_id, level=level.upper(), message=msg))
-                self.db.commit()
+                session.add(OrderLog(order_id=self.order_id, level=level.upper(), message=msg))
+                session.commit()
             except Exception:
-                self.db.rollback()
+                session.rollback()
 
     def _update_order(self, **kwargs):
-        if not self.db:
+        session = self._get_db()
+        if not session:
             return
         try:
             from models import Order
-            order = self.db.session.get(Order, self.order_id)
+            order = session.get(Order, self.order_id)
             if order:
                 for k, v in kwargs.items():
                     setattr(order, k, v)
                 order.updated_at = datetime.utcnow()
-                self.db.commit()
+                session.commit()
         except Exception:
-            self.db.rollback()
+            session.rollback()
 
     def _mark_win(self, tab_id: int, order_no: str = ''):
         with self.lock:
@@ -997,33 +1009,44 @@ class AsyncGrabberEngine:
         self._winner_grade = None
         self._logs = []
 
+    def _get_db(self):
+        if self.db:
+            return self.db
+        try:
+            from models import db
+            return db.session
+        except Exception:
+            return None
+
     def log(self, level: str, msg: str):
         ts = datetime.now().isoformat()
         self._logs.append({'time': ts, 'level': level, 'message': msg})
         getattr(logger, level if level in ('debug', 'info', 'warning', 'error') else 'info')(
             f"[AsyncOrder#{self.order_id}] {msg}"
         )
-        if self.db:
+        session = self._get_db()
+        if session:
             try:
                 from models import OrderLog
-                self.db.add(OrderLog(order_id=self.order_id, level=level.upper(), message=msg))
-                self.db.commit()
+                session.add(OrderLog(order_id=self.order_id, level=level.upper(), message=msg))
+                session.commit()
             except Exception:
-                self.db.rollback()
+                session.rollback()
 
     def _update_order(self, **kwargs):
-        if not self.db:
+        session = self._get_db()
+        if not session:
             return
         try:
             from models import Order
-            order = self.db.session.get(Order, self.order_id)
+            order = session.get(Order, self.order_id)
             if order:
                 for k, v in kwargs.items():
                     setattr(order, k, v)
                 order.updated_at = datetime.utcnow()
-                self.db.commit()
+                session.commit()
         except Exception:
-            self.db.rollback()
+            session.rollback()
 
     def register_ticket_type(self, grade_index: int, name: str, price: int, ticket_per_person: int = 1):
         """注册一个座位档位"""

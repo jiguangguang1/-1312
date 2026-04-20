@@ -246,9 +246,12 @@ def start_grabber(order_id):
     db.session.commit()
 
     def run_in_thread():
+        from flask import current_app
         from grabber.engine import GrabberEngine
-        engine = GrabberEngine(order_id, config, db.session)
-        engine.run(target_time)
+        app = current_app._get_current_object()
+        with app.app_context():
+            engine = GrabberEngine(order_id, config)
+            engine.run(target_time)
 
     t = threading.Thread(target=run_in_thread, daemon=True)
     t.start()
