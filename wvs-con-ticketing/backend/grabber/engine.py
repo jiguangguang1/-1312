@@ -225,19 +225,92 @@ class GrabberEngine:
             pass
         return p
 
+    def _detect_platform(self) -> str:
+        """检测目标平台: 'nol' | 'interpark' """
+        url = self.cfg.get('perf_url', '')
+        if 'world.nol.com' in url:
+            return 'nol'
+        return 'interpark'
+
     def login(self) -> bool:
-        self.log('info', '🔐 登录 Interpark...')
+        platform = self._detect_platform()
         interpark_id = self.cfg.get('interpark_id', '')
         interpark_pw = self.cfg.get('interpark_pw', '')
+
         if not interpark_id:
-            page = self.new_page()
-            page.goto("https://tickets.interpark.com")
-            time.sleep(2)
-            if 'login' not in page.url.lower():
-                self.log('info', '✅ 已有登录态')
-                return True
             self.log('error', '需要登录但未配置账号')
             return False
+
+        if platform == 'nol':
+            return self._login_nol(interpark_id, interpark_pw)
+        return self._login_interpark(interpark_id, interpark_pw)
+
+    def _login_nol(self, email: str, password: str) -> bool:
+        """NOL (world.nol.com) 登录"""
+        self.log('info', '🔐 登录 NOL...')
+        page = self.new_page()
+        try:
+            page.goto("https://world.nol.com/zh-CN/auth-web/login", wait_until='domcontentloaded', timeout=20000)
+            time.sleep(3)
+
+            # 填写邮箱
+            if not self._fill(page, ['input[name="email"]', 'input[type="email"]'], email):
+                self.log('error', '找不到邮箱输入框')
+                self._shot(page, 'nol_login_no_email')
+                return False
+
+            # 填写密码
+            if not self._fill(page, ['input[name="password"]', 'input[type="password"]'], password):
+                self.log('error', '找不到密码输入框')
+                return False
+
+            time.sleep(0.5)
+
+            # 点击登录按钮（NOL 用 React 组件，可能是 div/span）
+            login_clicked = self._click(page, [
+                'button[type="submit"]',
+                'button:has-text("登录")',
+                'button:has-text("Login")',
+                'button:has-text("로그인")',
+                'div[role="button"]:has-text("登录")',
+                'span:has-text("登录")',
+                'div:has-text("登录"):not(:has(div))',
+            ])
+
+            if not login_clicked:
+                # 兜底：按 Enter 提交
+                self.log('info', '尝试按 Enter 提交...')
+                page.keyboard.press('Enter')
+
+            time.sleep(5)
+
+            # 检查是否登录成功
+            current_url = page.url
+            if 'auth-web' not in current_url and 'login' not in current_url.lower():
+                self.save_state()
+                self.log('info', '✅ NOL 登录成功')
+                return True
+
+            # 检查 Cloudflare 验证码
+            if 'turnstile' in page.content().lower() or 'challenge' in page.url.lower():
+                self.log('warning', '🔐 检测到 Cloudflare 验证码，等待自动通过...')
+                time.sleep(10)
+                if 'auth-web' not in page.url:
+                    self.save_state()
+                    self.log('info', '✅ 验证码通过，登录成功')
+                    return True
+
+            self._shot(page, 'nol_login_failed')
+            self.log('warning', 'NOL 登录未自动完成')
+            return False
+        except Exception as e:
+            self.log('error', f'NOL 登录异常: {e}')
+            self._shot(page, 'nol_login_error')
+            return False
+
+    def _login_interpark(self, interpark_id: str, interpark_pw: str) -> bool:
+        """Interpark 韩国版登录"""
+        self.log('info', '🔐 登录 Interpark...')
         page = self.new_page()
         page.goto("https://accounts.interpark.com/login")
         time.sleep(2)
@@ -260,10 +333,13 @@ class GrabberEngine:
             self.log('error', '未配置演出 URL')
             return False
         try:
-            page.goto(url, wait_until='domcontentloaded', timeout=15000)
+            if self._detect_platform() == 'nol':
+                page.goto(url, wait_until='domcontentloaded', timeout=20000)
+            else:
+                page.goto(url, wait_until='domcontentloaded', timeout=15000)
         except Exception as e:
             self.log('warning', f'页面加载慢: {e}')
-        time.sleep(2)
+        time.sleep(3)
         return True
 
     def pick_schedule(self, page, idx: int):
@@ -284,12 +360,23 @@ class GrabberEngine:
 
     def click_booking(self, page) -> bool:
         self.log('info', '🛒 点击预约...')
-        booking_sels = [
-            'text=예매하기', 'text=바로예매', 'text=예매',
-            '#btnBooking', '.btn_booking', '.btn-reserve',
-            'a[href*="Booking"]', 'button:has-text("예매")',
-            'button:has-text("바로")', 'a:has-text("예매")',
-        ]
+        platform = self._detect_platform()
+
+        if platform == 'nol':
+            booking_sels = [
+                'text=立即预订', 'text=预约购票', 'text=订票', 'text=立即购买',
+                'text=立即抢购', 'text=马上抢', 'text=立即预约', 'text=购买',
+                'text=Book', 'text=Buy', 'text=예매하기', 'text=바로예매',
+                'div[role="button"]:has-text("预约")', 'div[role="button"]:has-text("购买")',
+                'div[role="button"]:has-text("Book")',
+            ]
+        else:
+            booking_sels = [
+                'text=예매하기', 'text=바로예매', 'text=예매',
+                '#btnBooking', '.btn_booking', '.btn-reserve',
+                'a[href*="Booking"]', 'button:has-text("예매")',
+                'button:has-text("바로")', 'a:has-text("예매")',
+            ]
         max_retries = self.cfg.get('max_click_retries', 100)
         delay = self.cfg.get('click_delay', 0.05)
         lock_delay_ms = self.cfg.get('lock_delay', 0)
@@ -1155,28 +1242,64 @@ class AsyncGrabberEngine:
     # ──────────────── 异步登录 ────────────────
 
     async def _async_login(self) -> bool:
-        self.log('info', '🔐 登录 Interpark...')
         interpark_id = self.cfg.get('interpark_id', '')
         interpark_pw = self.cfg.get('interpark_pw', '')
 
         if not interpark_id:
-            ctx = await self._new_context()
-            page = await ctx.new_page()
-            page.set_default_timeout(self.cfg.get('page_timeout', 10000))
-            await page.goto("https://tickets.interpark.com")
-            await asyncio.sleep(2)
-            if 'login' not in page.url.lower():
-                self.log('info', '✅ 已有登录态')
-                # 保存 state 给后续 context 用
+            self.log('error', '需要登录但未配置账号')
+            return False
+
+        platform = self._detect_platform()
+        if platform == 'nol':
+            return await self._async_login_nol(interpark_id, interpark_pw)
+        return await self._async_login_interpark(interpark_id, interpark_pw)
+
+    async def _async_login_nol(self, email: str, password: str) -> bool:
+        """NOL 异步登录"""
+        self.log('info', '🔐 登录 NOL...')
+        ctx = await self._new_context()
+        page = await ctx.new_page()
+        page.set_default_timeout(20000)
+        try:
+            await page.goto("https://world.nol.com/zh-CN/auth-web/login", wait_until='domcontentloaded')
+            await asyncio.sleep(3)
+
+            await self._async_fill(page, ['input[name="email"]', 'input[type="email"]'], email)
+            await self._async_fill(page, ['input[name="password"]', 'input[type="password"]'], password)
+            await asyncio.sleep(0.5)
+
+            clicked = await self._async_click(page, [
+                'button[type="submit"]',
+                'button:has-text("登录")',
+                'button:has-text("Login")',
+                'div[role="button"]:has-text("登录")',
+                'span:has-text("登录")',
+            ])
+            if not clicked:
+                await page.keyboard.press('Enter')
+
+            await asyncio.sleep(8)
+
+            if 'auth-web' not in page.url and 'login' not in page.url.lower():
                 state = await ctx.storage_state()
                 with open(f"state_order_{self.order_id}.json", 'w') as f:
                     json.dump(state, f)
+                self.log('info', '✅ NOL 登录成功')
                 await ctx.close()
                 return True
-            self.log('error', '需要登录但未配置 Interpark 账号')
+
+            await self._async_shot(page, 'nol_login_failed')
+            self.log('warning', 'NOL 登录未自动完成')
+            await ctx.close()
+            return False
+        except Exception as e:
+            self.log('error', f'NOL 登录异常: {e}')
             await ctx.close()
             return False
 
+    async def _async_login_interpark(self, interpark_id: str, interpark_pw: str) -> bool:
+        """Interpark 异步登录"""
+        self.log('info', '🔐 登录 Interpark...')
         ctx = await self._new_context()
         page = await ctx.new_page()
         page.set_default_timeout(self.cfg.get('page_timeout', 10000))
@@ -1187,11 +1310,9 @@ class AsyncGrabberEngine:
             '#userId', 'input[name="userId"]', 'input[id="id"]',
             'input[placeholder*="아이디"]'
         ], interpark_id)
-
         await self._async_fill(page, [
             '#userPwd', 'input[name="userPwd"]', 'input[type="password"]'
         ], interpark_pw)
-
         await asyncio.sleep(0.5)
         await self._async_click(page, [
             '#btn_login', 'button:has-text("로그인")',
@@ -1205,7 +1326,6 @@ class AsyncGrabberEngine:
             await ctx.close()
             return False
 
-        # 保存登录态
         state = await ctx.storage_state()
         with open(f"state_order_{self.order_id}.json", 'w') as f:
             json.dump(state, f)
@@ -1221,10 +1341,11 @@ class AsyncGrabberEngine:
             self.log('error', '未配置演出 URL')
             return False
         try:
-            await page.goto(url, wait_until='domcontentloaded', timeout=15000)
+            timeout = 20000 if 'world.nol.com' in url else 15000
+            await page.goto(url, wait_until='domcontentloaded', timeout=timeout)
         except Exception as e:
             self.log('warning', f'页面加载慢: {e}')
-        await asyncio.sleep(2)
+        await asyncio.sleep(3)
         return True
 
     async def _async_pick_schedule(self, page, idx: int):
@@ -1247,12 +1368,22 @@ class AsyncGrabberEngine:
 
     async def _async_click_booking(self, page) -> bool:
         self.log('info', '🛒 点击预约...')
-        booking_sels = [
-            'text=예매하기', 'text=바로예매', 'text=예매',
-            '#btnBooking', '.btn_booking', '.btn-reserve',
-            'a[href*="Booking"]', 'button:has-text("예매")',
-            'button:has-text("바로")', 'a:has-text("예매")',
-        ]
+        platform = self._detect_platform()
+
+        if platform == 'nol':
+            booking_sels = [
+                'text=立即预订', 'text=预约购票', 'text=订票', 'text=立即购买',
+                'text=立即抢购', 'text=马上抢', 'text=立即预约', 'text=购买',
+                'text=Book', 'text=Buy', 'text=예매하기', 'text=바로예매',
+                'div[role="button"]:has-text("预约")', 'div[role="button"]:has-text("购买")',
+            ]
+        else:
+            booking_sels = [
+                'text=예매하기', 'text=바로예매', 'text=예매',
+                '#btnBooking', '.btn_booking', '.btn-reserve',
+                'a[href*="Booking"]', 'button:has-text("예매")',
+                'button:has-text("바로")', 'a:has-text("예매")',
+            ]
         max_retries = self.cfg.get('max_click_retries', 100)
         delay = self.cfg.get('click_delay', 0.05)
         lock_delay_ms = self.cfg.get('lock_delay', 0)
