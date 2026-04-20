@@ -5,6 +5,7 @@ __pycache__/
 *.db-journal
 logs/
 screenshots/
-*.json
+state_order_*.json
 venv/
 .env
+*.log
