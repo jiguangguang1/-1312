@@ -6,7 +6,7 @@ from flask import Blueprint, request, jsonify, current_app
 from flask_jwt_extended import get_jwt_identity
 
 from auth import login_required
-from models import db, Order, OrderLog, User, TicketClass, Account
+from models import db, Order, OrderLog, User, TicketClass
 
 orders_bp = Blueprint('orders', __name__, url_prefix='/api/orders')
 
